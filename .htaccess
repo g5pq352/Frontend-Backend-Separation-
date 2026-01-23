@@ -1,0 +1,36 @@
+RewriteEngine On
+
+#--------------------------------------------------------------------------------------------------------
+# 設定基準目錄，避免伺服器路徑誤判
+# 如果您的網址是 http://127.0.0.1/template-ver3/...，這裡建議設為 /template-ver3/
+# 上線才要打開
+#RewriteBase /
+
+# 1. 登入與儀表板 (導向到 cms 資料夾)
+RewriteRule ^portal-auth/signin/?$ cms/login.php [L,QSA]
+RewriteRule ^portal-auth/dashboard/?$ cms/first.php [L,QSA]
+RewriteRule ^portal-auth/picture_library/?$ cms/galleryManager_list.php [L,QSA]
+RewriteRule ^portal-auth/trash/?$ cms/trash.php [L,QSA]
+
+# 2. 列表頁
+RewriteRule ^portal-auth/tpl=([a-zA-Z0-9_-]+)/list/?$ cms/list.php?module=$1 [L,QSA]
+
+# 3. 詳細頁
+RewriteRule ^portal-auth/tpl=([a-zA-Z0-9_-]+)/detail/?$ cms/detail.php?module=$1&action=edit [L,QSA]
+
+# 4. 資訊頁
+RewriteRule ^portal-auth/tpl=([a-zA-Z0-9_-]+)/info/?$ cms/info.php?module=$1 [L,QSA]
+
+# 5. API 路由 - 轉發到 index.php
+RewriteCond %{REQUEST_URI} ^/api/
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [QSA,L]
+
+# 6. 其他路由
+RewriteCond %{REQUEST_URI} !^/cms
+RewriteCond %{REQUEST_URI} !^/api
+
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [QSA,L]
