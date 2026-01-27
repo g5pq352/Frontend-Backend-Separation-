@@ -14,15 +14,17 @@ $settingPage = [
     'cols' => [
         'title' => 'user_name',
         'active' => 'user_active',
-        'sort' => null  // admin 資料表沒有排序欄位
+        'sort' => null,  // admin 資料表沒有排序欄位
+        'delete_time' => null  // admin 資料表沒有 delete_time 欄位
     ],
     
     'listPage' => [
         'title' => '管理員列表',
-        'itemsPerPage' => 9999999,
+        // ----------------------------------------------------------
         'hasCategory' => false,
         'hasTrash' => false,
         'hasLanguage' => false,
+        // ----------------------------------------------------------
         'columns' => [
             ['field' => 'user_name', 'label' => '管理員名稱', 'type' => 'text', 'width' => '150'],
             ['field' => 'group_name', 'label' => '權限群組', 'type' => 'text', 'width' => '120'],
@@ -30,6 +32,7 @@ $settingPage = [
             ['field' => 'edit', 'label' => '編輯', 'type' => 'button', 'width' => '60'],
             ['field' => 'delete', 'label' => '刪除', 'type' => 'button', 'width' => '30'],
         ],
+        'itemsPerPage' => 9999999,
         'orderBy' => 'user_id ASC',
         'customQuery' => 'SELECT admin.user_id, admin.user_name, admin.group_id, admin.user_active, 
                           authority_groups.group_name 
@@ -47,7 +50,6 @@ $settingPage = [
                     'field' => 'user_name',
                     'label' => '管理員名稱',
                     'required' => true,
-                    'size' => 40,
                     'note' => '登入帳號（唯一）'
                 ],
                 [
@@ -55,7 +57,6 @@ $settingPage = [
                     'field' => 'user_password',
                     'label' => '密碼',
                     'required' => false,
-                    'size' => 40,
                     'note' => '新增時必填，編輯時留空表示不修改密碼'
                 ],
                 [
@@ -83,10 +84,6 @@ $settingPage = [
     ],
     
     'hiddenFields' => [],
-    
-    'fileUpload' => [
-        'enabled' => false
-    ]
 ];
 
 return $settingPage;

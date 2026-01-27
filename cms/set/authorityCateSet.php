@@ -13,20 +13,25 @@ $settingPage = [
 
     'cols' => [
         'title' => 'group_name',
-        'active' => 'group_active'
+        'active' => 'group_active',
+        'sort' => null,
+        'delete_time' => null  // authority_groups 資料表沒有 delete_time 欄位
     ],
     
     'listPage' => [
         'title' => '權限群組列表',
-        'itemsPerPage' => 9999999,
+        // ----------------------------------------------------------
         'hasCategory' => false,
         'hasLanguage' => false,
+        // ----------------------------------------------------------
         'columns' => [
             ['field' => 'group_name', 'label' => '群組名稱', 'type' => 'text', 'width' => '200'],
             ['field' => 'group_description', 'label' => '描述', 'type' => 'text', 'width' => '300'],
             ['field' => 'group_active', 'label' => '狀態', 'type' => 'active', 'width' => '60'],
-            ['field' => 'edit', 'label' => '編輯', 'type' => 'button', 'width' => '80']
+            ['field' => 'edit', 'label' => '編輯', 'type' => 'button', 'width' => '80'],
+            ['field' => 'delete', 'label' => '刪除', 'type' => 'button', 'width' => '30']
         ],
+        'itemsPerPage' => 9999999,
         'orderBy' => 'group_id ASC'
     ],
     
@@ -40,7 +45,6 @@ $settingPage = [
                     'field' => 'group_name',
                     'label' => '群組名稱',
                     'required' => true,
-                    'size' => 40,
                     'note' => '例如：系統管理員、編輯者、工讀生'
                 ],
                 [
@@ -69,10 +73,6 @@ $settingPage = [
     ],
     
     'hiddenFields' => [],
-    
-    'fileUpload' => [
-        'enabled' => false
-    ]
 ];
 
 return $settingPage;
