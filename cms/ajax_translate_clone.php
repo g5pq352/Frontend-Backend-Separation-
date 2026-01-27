@@ -146,11 +146,14 @@ try {
     $stmtFiles->execute([':oldId' => $itemId]);
     $files = $stmtFiles->fetchAll(PDO::FETCH_ASSOC);
     
+    $fileIdMap = []; // 【新增】用於紀錄舊檔案 ID 與新檔案 ID 的對應關係
+
     foreach ($files as $file) {
+        $oldFileId = $file['file_id'];
         unset($file['file_id']); // 移除檔案主鍵
         $file[$fileFk] = $newId; // 關連到新紀錄
         
-        // 【修正】依據 photo_process.php 規範與使用者需求
+        // 【修正】依據 upload_process.php 規範與使用者需求
         $destBaseName = (!empty($oldCatTitle)) ? $oldCatTitle : $module;
         // 淨化名稱 (移除不合法字元) - 修正 regex 語法
         $destBaseName = preg_replace('/[^\p{L}\p{N}\s_-]/u', '', $destBaseName ?? '');
@@ -199,13 +202,118 @@ try {
         $sqlInsertFile = "INSERT INTO file_set ($fColList) VALUES ($fPlaceholders)";
         $stmtInsertFile = $conn->prepare($sqlInsertFile);
         $stmtInsertFile->execute($fValues);
+
+        $newFileId = $conn->lastInsertId();
+        $fileIdMap[$oldFileId] = $newFileId; // 紀錄對應
+    }
+
+    // 6. 【新增】複製動態欄位 (data_dynamic_fields)
+    $sqlDynamic = "SELECT * FROM data_dynamic_fields WHERE df_d_id = :oldId";
+    $stmtDynamic = $conn->prepare($sqlDynamic);
+    $stmtDynamic->execute([':oldId' => $itemId]);
+    $dynamicFields = $stmtDynamic->fetchAll(PDO::FETCH_ASSOC);
+
+    foreach ($dynamicFields as $df) {
+        unset($df['df_id']);
+        $df['df_d_id'] = $newId;
+        
+        // 如果有關連到檔案，更新為新檔案 ID
+        if (!empty($df['df_file_id']) && isset($fileIdMap[$df['df_file_id']])) {
+            $df['df_file_id'] = $fileIdMap[$df['df_file_id']];
+        }
+
+        $dfCols = array_keys($df);
+        $dfValues = array_values($df);
+        $dfPlaceholders = implode(',', array_fill(0, count($dfCols), '?'));
+        $dfColList = implode(',', $dfCols);
+
+        $sqlInsertDF = "INSERT INTO data_dynamic_fields ($dfColList) VALUES ($dfPlaceholders)";
+        $stmtInsertDF = $conn->prepare($sqlInsertDF);
+        $stmtInsertDF->execute($dfValues);
     }
     
+    // 7. 【新增】處理 data_taxonomy_map 關連複製與重新排序
+    require_once(__DIR__ . '/includes/taxonomyMapHelper.php');
+    require_once(__DIR__ . '/includes/SortReorganizer.php');
+
+    $useTaxonomyMapSort = $moduleConfig['listPage']['useTaxonomyMapSort'] ?? false;
+    $affectedCategories = [];
+
+    if (hasTaxonomyMapTable($conn)) {
+        // 取得原始項目的所有分類關連
+        $stmtOldMaps = $conn->prepare("SELECT t_id, map_level FROM data_taxonomy_map WHERE d_id = :oldId");
+        $stmtOldMaps->execute([':oldId' => $itemId]);
+        $oldMaps = $stmtOldMaps->fetchAll(PDO::FETCH_ASSOC);
+
+        foreach ($oldMaps as $om) {
+            $oldTId = $om['t_id'];
+            $mapLevel = $om['map_level'];
+
+            // 智慧尋找目標語系的同名分類
+            // 由於 Mapping Table 是獨立的，我們需要找到目標語系對應的 t_id
+            $stmtTaxName = $conn->prepare("SELECT t_name FROM taxonomies WHERE t_id = :tid");
+            $stmtTaxName->execute([':tid' => $oldTId]);
+            $taxName = $stmtTaxName->fetchColumn();
+
+            if ($taxName) {
+                $stmtNewTaxId = $conn->prepare("SELECT t_id FROM taxonomies WHERE t_name = :name AND lang = :lang LIMIT 1");
+                $stmtNewTaxId->execute([':name' => $taxName, ':lang' => $targetLang]);
+                $newTId = $stmtNewTaxId->fetchColumn();
+
+                if ($newTId) {
+                    // 插入新的關聯 (sort_num 先填 9999，稍後由 reorderTaxonomyMap 導正)
+                    $stmtInsMap = $conn->prepare("INSERT INTO data_taxonomy_map (d_id, t_id, map_level, sort_num) VALUES (:did, :tid, :ml, 9999)");
+                    $stmtInsMap->execute([
+                        ':did' => $newId,
+                        ':tid' => $newTId,
+                        ':ml'  => $mapLevel
+                    ]);
+                    $affectedCategories[] = $newTId;
+                }
+            }
+        }
+    }
+
+    // Step 1: 重新整理目標語系的主表排序 (All 視圖)
+    $mainSortCol = $moduleConfig['cols']['sort'] ?? 'd_sort';
+    $mainDeleteCol = $moduleConfig['cols']['delete_time'] ?? 'd_delete_time';
+    $hasDeleteTime = !empty($mainDeleteCol);
+    $parentIdField = $moduleConfig['cols']['parent_id'] ?? null;
+    $menuKey = $moduleConfig['menuKey'] ?? null;
+    $menuValue = $moduleConfig['menuValue'] ?? null;
+
+    SortReorganizer::reorganizeAll(
+        $conn,
+        $tableName,
+        $primaryKey,
+        $mainSortCol,
+        $menuKey,
+        $hasDeleteTime,
+        $mainDeleteCol,
+        null, // categoryField
+        $parentIdField,
+        $menuValue,
+        $targetLang // 指定目標語系
+    );
+
+    // Step 2: 重新整理受影響分類的排序 (Category 視圖)
+    // 如果原始資料有 t_id = 0 (全域 Map)，也要一起處理
+    if ($useTaxonomyMapSort) {
+        // 去重並包含受影響的分類
+        $affectedCategories = array_unique($affectedCategories);
+        foreach ($affectedCategories as $tid) {
+            reorderTaxonomyMap($conn, intval($tid), null, [
+                $menuKey => $menuValue,
+                'lang'   => $targetLang
+            ], $tableName);
+        }
+    }
+
     $conn->commit();
     echo json_encode([
         'success' => true,
         'new_id' => $newId,
-        'message' => '複製成功'
+        'message' => '複製成功 (已同步重新排序)'
     ]);
     
 } catch (Exception $e) {

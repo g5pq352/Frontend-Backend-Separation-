@@ -1,16 +1,12 @@
 <?php
 /**
- * AJAX 置頂切換處理 - 高效能優化版
- * 優化目標：5ms 內完成置頂切換
+ * AJAX 置頂切換處理
+ * 處理項目的置頂狀態切換
  */
-
-require_once __DIR__ . '/auth_check.php';
-requireCmsAuth();
-
+session_start();
 require_once '../Connections/connect2data.php';
 
 header('Content-Type: application/json');
-ini_set('display_errors', 0);
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     echo json_encode(['success' => false, 'message' => 'Invalid request method']);
@@ -18,105 +14,85 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 $module = $_POST['module'] ?? '';
-$itemId = (int)($_POST['item_id'] ?? 0);
+$itemId = intval($_POST['item_id'] ?? 0);
+$categoryId = intval($_POST['category_id'] ?? 0); // 【新增】取得分類 ID
 
 if (!$module || !$itemId) {
-    echo json_encode(['success' => false, 'message' => 'Missing parameters']);
+    echo json_encode(['success' => false, 'message' => 'Missing required parameters']);
     exit;
 }
 
-// 快速載入模組配置
-static $configCache = [];
-if (!isset($configCache[$module])) {
-    $configFile = __DIR__ . "/set/{$module}Set.php";
-    if (!file_exists($configFile)) {
-        echo json_encode(['success' => false, 'message' => 'Config not found']);
-        exit;
-    }
-    $moduleConfig = require $configFile;
-    if (!is_array($moduleConfig) && isset($settingPage)) {
-        $moduleConfig = $settingPage;
-    }
-    $configCache[$module] = $moduleConfig;
-} else {
-    $moduleConfig = $configCache[$module];
+// 載入模組配置
+$configFile = __DIR__ . "/set/{$module}Set.php";
+if (!file_exists($configFile)) {
+    echo json_encode(['success' => false, 'message' => "Module config not found: {$module}Set.php"]);
+    exit;
 }
 
-$tableName = $moduleConfig['tableName'];
-$col_id = $moduleConfig['primaryKey'];
-$cols = $moduleConfig['cols'] ?? [];
-$col_top = $cols['top'] ?? 'd_top';
-$col_sort = $cols['sort'] ?? 'd_sort';
-$categoryField = $moduleConfig['listPage']['categoryField'] ?? null;
-$menuKey = $moduleConfig['menuKey'] ?? null;
-$menuValue = $moduleConfig['menuValue'] ?? null;
+require_once $configFile;
+$moduleConfig = $settingPage;
 
+$tableName = $moduleConfig['tableName'];
+
+// ---------------------------------------------------------------------
+// 【直接處理】置頂切換邏輯
+// ---------------------------------------------------------------------
 try {
+    require_once 'includes/elements/ModuleConfigElement.php';
+    require_once 'includes/taxonomyMapHelper.php';
+    require_once 'includes/SortReorganizer.php';
+    require_once 'includes/UnifiedSortManager.php';
+
+    $moduleConfig = \ModuleConfigElement::loadConfig($module);
+    $tableName = $moduleConfig['tableName'];
+    $primaryKey = $moduleConfig['primaryKey'];
+    $cols = $moduleConfig['cols'] ?? [];
+    $col_top = $cols['top'] ?? 'd_top';
+    $col_sort = $cols['sort'] ?? 'd_sort';
+    $parentIdField = $cols['parent_id'] ?? null;
+    $menuKey = $moduleConfig['menuKey'] ?? null;
+    $menuValue = $moduleConfig['menuValue'] ?? null;
+    $configUseTaxonomyMapSort = $moduleConfig['listPage']['useTaxonomyMapSort'] ?? true;
+
     $conn->beginTransaction();
 
-    // 1. 快速獲取當前狀態（單次查詢，只取需要的欄位）
-    $selectFields = "{$col_top}, {$col_sort}";
-    if ($categoryField) {
-        $selectFields .= ", {$categoryField}";
+    $stmt = $conn->prepare("SELECT * FROM {$tableName} WHERE {$primaryKey} = :id");
+    $stmt->execute([':id' => $itemId]);
+    $item = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$item) {
+        throw new Exception('找不到資料');
     }
 
-    $stmt = $conn->prepare("SELECT {$selectFields} FROM {$tableName} WHERE {$col_id} = ? LIMIT 1");
-    $stmt->execute([$itemId]);
-    $currentItem = $stmt->fetch(PDO::FETCH_ASSOC);
+    $useMapPin = ($configUseTaxonomyMapSort && $categoryId > 0 && hasTaxonomyMapTable($conn));
 
-    if (!$currentItem) {
-        throw new Exception('Item not found');
-    }
-
-    $currentTop = (int)($currentItem[$col_top] ?? 0);
-    $currentSort = (int)$currentItem[$col_sort];
-    $newTop = $currentTop ? 0 : 1;
-
-    // 2. 更新置頂狀態（單次 UPDATE）
-    $stmt = $conn->prepare("UPDATE {$tableName} SET {$col_top} = ? WHERE {$col_id} = ?");
-    $stmt->execute([$newTop, $itemId]);
-
-    // 3. 調整其他項目的排序（單次 UPDATE）
-    $whereConditions = ["{$col_top} = 0"];
-    $params = [];
-
-    if ($menuKey && $menuValue !== null) {
-        $whereConditions[] = "{$menuKey} = ?";
-        $params[] = $menuValue;
-    }
-
-    if ($categoryField && isset($currentItem[$categoryField])) {
-        $whereConditions[] = "{$categoryField} = ?";
-        $params[] = $currentItem[$categoryField];
-    }
-
-    $whereClause = 'WHERE ' . implode(' AND ', $whereConditions);
-
-    if ($newTop == 1) {
-        // 設定置頂：後面的項目往前補位
-        $sql = "UPDATE {$tableName} SET {$col_sort} = {$col_sort} - 1
-                {$whereClause} AND {$col_sort} > ?";
-        $params[] = $currentSort;
+    if ($useMapPin) {
+        // 切換 Map d_top
+        $stmtCheck = $conn->prepare("SELECT d_top FROM data_taxonomy_map WHERE d_id = :id AND t_id = :tid");
+        $stmtCheck->execute([':id' => $itemId, ':tid' => $categoryId]);
+        $currentTop = $stmtCheck->fetchColumn() ?: 0;
+        $newTop = $currentTop ? 0 : 1;
+        $conn->prepare("UPDATE data_taxonomy_map SET d_top = :top WHERE d_id = :id AND t_id = :tid")
+             ->execute([':top' => $newTop, ':id' => $itemId, ':tid' => $categoryId]);
     } else {
-        // 取消置頂：後面的項目往後讓位
-        $sql = "UPDATE {$tableName} SET {$col_sort} = {$col_sort} + 1
-                {$whereClause} AND {$col_sort} >= ? AND {$col_id} != ?";
-        $params[] = $currentSort;
-        $params[] = $itemId;
+        // 切換主表 d_top
+        $currentTop = $item[$col_top] ?? 0;
+        $newTop = $currentTop ? 0 : 1;
+        $conn->prepare("UPDATE {$tableName} SET {$col_top} = :top WHERE {$primaryKey} = :id")
+             ->execute([':top' => $newTop, ':id' => $itemId]);
     }
 
-    $stmt = $conn->prepare($sql);
-    $stmt->execute($params);
-
-    $conn->commit();
-
-    echo json_encode([
-        'success' => true,
-        'message' => $newTop ? '已置頂' : '已取消置頂',
-        'is_pinned' => $newTop
+    // 使用統一排序管理器進行全域與分類重排
+    \UnifiedSortManager::updateAfterDataChange($conn, $moduleConfig, $itemId, [
+        'lang' => $item['lang'] ?? null,
+        'categoryId' => $categoryId
     ]);
 
+    $conn->commit();
+    echo json_encode(['success' => true, 'message' => '置頂狀態已更新']);
 } catch (Exception $e) {
-    $conn->rollBack();
-    echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+    if ($conn->inTransaction()) {
+        $conn->rollBack();
+    }
+    echo json_encode(['success' => false, 'message' => '錯誤: ' . $e->getMessage()]);
 }

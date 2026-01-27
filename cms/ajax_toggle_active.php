@@ -1,56 +1,64 @@
 <?php
 /**
- * AJAX 狀態切換處理 - 高效能優化版
- * 優化目標：5ms 內完成狀態切換
- * 支援狀態：0=不顯示, 1=顯示, 2=草稿
+ * AJAX 顯示狀態切換處理
+ * 處理項目的顯示/不顯示/草稿狀態切換
  */
-
-require_once __DIR__ . '/auth_check.php';
-requireCmsAuth();
-
-require_once('../Connections/connect2data.php');
+session_start();
+require_once '../Connections/connect2data.php';
 
 header('Content-Type: application/json');
-ini_set('display_errors', 0);
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    echo json_encode(['success' => false, 'message' => 'Invalid request method']);
+    exit;
+}
+
+$module = $_POST['module'] ?? '';
+$itemId = intval($_POST['item_id'] ?? 0);
+$newValue = intval($_POST['new_value'] ?? 0);
+$field = $_POST['field'] ?? 'd_active';
+
+if (!$module || !$itemId) {
+    echo json_encode(['success' => false, 'message' => 'Missing required parameters']);
+    exit;
+}
+
+// 載入模組配置
+$configFile = __DIR__ . "/set/{$module}Set.php";
+if (!file_exists($configFile)) {
+    echo json_encode(['success' => false, 'message' => "Module config not found: {$module}Set.php"]);
+    exit;
+}
+
+// 載入設定檔
+$moduleConfig = require $configFile;
+if (!is_array($moduleConfig) && isset($settingPage)) {
+    $moduleConfig = $settingPage;
+}
+
+if (!is_array($moduleConfig)) {
+    echo json_encode(['success' => false, 'message' => 'Invalid config format']);
+    exit;
+}
 
 try {
-    $module = $_POST['module'] ?? '';
-    $itemId = (int)($_POST['item_id'] ?? 0);
-    $newValue = (int)($_POST['new_value'] ?? 0);
-
-    if (empty($module) || $itemId <= 0) {
-        throw new Exception('缺少必要參數');
-    }
-
-    // 快速載入模組配置
-    static $configCache = [];
-    if (!isset($configCache[$module])) {
-        $configFile = __DIR__ . "/set/{$module}Set.php";
-        if (!file_exists($configFile)) {
-            throw new Exception('找不到模組配置檔案');
-        }
-        $moduleConfig = require $configFile;
-        $configCache[$module] = $moduleConfig;
-    } else {
-        $moduleConfig = $configCache[$module];
-    }
-
     $tableName = $moduleConfig['tableName'];
     $primaryKey = $moduleConfig['primaryKey'];
-    $col_active = $moduleConfig['cols']['active'] ?? 'd_active';
 
-    // 單次 UPDATE 更新狀態
-    $stmt = $conn->prepare("UPDATE {$tableName} SET {$col_active} = ? WHERE {$primaryKey} = ?");
-    $stmt->execute([$newValue, $itemId]);
+    // 過濾欄位名稱，防止 SQL 注入
+    $field = preg_replace('/[^a-zA-Z0-9_]/', '', $field);
 
-    echo json_encode([
-        'success' => true,
-        'message' => '狀態已更新'
-    ]);
+    // 更新狀態
+    $sql = "UPDATE {$tableName} SET {$field} = :new_value WHERE {$primaryKey} = :item_id";
+    $stmt = $conn->prepare($sql);
+    $stmt->bindValue(':new_value', $newValue, PDO::PARAM_INT);
+    $stmt->bindValue(':item_id', $itemId, PDO::PARAM_INT);
 
+    if ($stmt->execute()) {
+        echo json_encode(['success' => true, 'message' => '狀態已更新']);
+    } else {
+        echo json_encode(['success' => false, 'message' => '更新失敗']);
+    }
 } catch (Exception $e) {
-    echo json_encode([
-        'success' => false,
-        'message' => $e->getMessage()
-    ]);
+    echo json_encode(['success' => false, 'message' => '錯誤: ' . $e->getMessage()]);
 }

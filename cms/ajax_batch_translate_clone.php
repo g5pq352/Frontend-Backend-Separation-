@@ -4,6 +4,7 @@
  */
 
 require_once('../Connections/connect2data.php');
+require_once('includes/elements/FormProcessElement.php');
 
 header('Content-Type: application/json');
 
@@ -14,36 +15,98 @@ try {
     $module = $_POST['module'] ?? '';
     $itemIds = $_POST['item_ids'] ?? []; // Expected as an array
     $targetLang = $_POST['target_lang'] ?? '';
-    $overwrite = (int)($_POST['overwrite'] ?? 0); // 【新增】覆蓋參數
-    
+    $overwrite = (int)($_POST['overwrite'] ?? 0);
+    $isInfo = (int)($_POST['is_info'] ?? 0); // 標記是否為 info.php 的請求
+
     if (empty($module) || empty($itemIds) || !is_array($itemIds) || empty($targetLang)) {
         throw new Exception('缺少必要參數');
     }
-    
+
     // 1. 載入模組配置
     $configFile = __DIR__ . "/set/{$module}Set.php";
     if (!file_exists($configFile)) {
         throw new Exception("找不到模組配置檔案");
     }
-    
+
     $moduleConfig = require $configFile;
     $tableName = $moduleConfig['tableName'];
     $primaryKey = $moduleConfig['primaryKey'];
     $langField = 'lang';
     $fileFk = $moduleConfig['cols']['file_fk'] ?? 'file_d_id';
+    $hasHierarchy = $moduleConfig['listPage']['hasHierarchy'] ?? false;
+    $parentIdField = $moduleConfig['cols']['parent_id'] ?? null;
+
+    // 【新增】info.php 專用：檢查目標語系是否已存在資料
+    if ($isInfo) {
+        $menuKey = $moduleConfig['menuKey'] ?? 'd_class1';
+        $menuValue = $moduleConfig['menuValue'] ?? $module;
+
+        $checkSql = "SELECT {$primaryKey} FROM {$tableName} WHERE {$menuKey} = :menuValue AND {$langField} = :targetLang LIMIT 1";
+        $checkStmt = $conn->prepare($checkSql);
+        $checkStmt->execute([':menuValue' => $menuValue, ':targetLang' => $targetLang]);
+        $existingId = $checkStmt->fetchColumn();
+
+        if ($existingId) {
+            if (!$overwrite) {
+                // 不覆蓋，返回錯誤
+                throw new Exception("目標語系 ({$targetLang}) 已存在資料，請勾選「覆蓋已存在的資料」後重試");
+            } else {
+                // 覆蓋模式：刪除舊資料（包含關聯的檔案和動態欄位）
+                // 1. 刪除關聯的檔案記錄和實體檔案
+                $fileStmt = $conn->prepare("SELECT * FROM file_set WHERE {$fileFk} = :id");
+                $fileStmt->execute([':id' => $existingId]);
+                foreach ($fileStmt->fetchAll(PDO::FETCH_ASSOC) as $file) {
+                    // 刪除實體檔案
+                    foreach (['file_link1', 'file_link2', 'file_link3', 'file_link4', 'file_link5'] as $linkKey) {
+                        if (!empty($file[$linkKey])) {
+                            $filePath = "../" . $file[$linkKey];
+                            if (file_exists($filePath)) {
+                                @unlink($filePath);
+                            }
+                        }
+                    }
+                }
+                // 刪除檔案記錄
+                $conn->prepare("DELETE FROM file_set WHERE {$fileFk} = :id")->execute([':id' => $existingId]);
+
+                // 2. 刪除動態欄位（包含關聯的圖片）
+                $dfStmt = $conn->prepare("SELECT df_file_id FROM data_dynamic_fields WHERE df_d_id = :id AND df_file_id IS NOT NULL");
+                $dfStmt->execute([':id' => $existingId]);
+                foreach ($dfStmt->fetchAll(PDO::FETCH_COLUMN) as $fileId) {
+                    // 刪除動態欄位關聯的圖片實體檔案
+                    $dfFileStmt = $conn->prepare("SELECT * FROM file_set WHERE file_id = :fileId");
+                    $dfFileStmt->execute([':fileId' => $fileId]);
+                    if ($dfFile = $dfFileStmt->fetch(PDO::FETCH_ASSOC)) {
+                        foreach (['file_link1', 'file_link2', 'file_link3', 'file_link4', 'file_link5'] as $linkKey) {
+                            if (!empty($dfFile[$linkKey])) {
+                                $filePath = "../" . $dfFile[$linkKey];
+                                if (file_exists($filePath)) {
+                                    @unlink($filePath);
+                                }
+                            }
+                        }
+                        $conn->prepare("DELETE FROM file_set WHERE file_id = :fileId")->execute([':fileId' => $fileId]);
+                    }
+                }
+                // 刪除動態欄位記錄
+                $conn->prepare("DELETE FROM data_dynamic_fields WHERE df_d_id = :id")->execute([':id' => $existingId]);
+
+                // 3. 刪除主資料
+                $conn->prepare("DELETE FROM {$tableName} WHERE {$primaryKey} = :id")->execute([':id' => $existingId]);
+            }
+        }
+    }
     
     $successCount = 0;
     $errors = [];
-    
-    // 【新增】排序計數器，用於批次複製時保持順序
     $sortCounter = [];
 
-    foreach ($itemIds as $itemId) {
-        $itemId = (int)$itemId;
-        if ($itemId <= 0) continue;
-
+    /**
+     * 遞迴複製函數
+     */
+    $cloneItem = function($itemId, $newParentId = null) use (&$cloneItem, $conn, $tableName, $primaryKey, $langField, $targetLang, $moduleConfig, $fileFk, $module, $hasHierarchy, $parentIdField, &$successCount, &$errors, &$sortCounter) {
         try {
-            // 2. 獲取原始資料
+            // 獲取原始資料
             $sqlSelect = "SELECT * FROM {$tableName} WHERE {$primaryKey} = :id";
             $stmtSelect = $conn->prepare($sqlSelect);
             $stmtSelect->execute([':id' => $itemId]);
@@ -53,351 +116,265 @@ try {
                 throw new Exception("找不到原始資料 (ID: {$itemId})");
             }
             
-            // 獲取原始資料的語系
             $sourceLang = $rowData[$langField] ?? '';
-            
-            // 【新增】判斷是否來自 info.php
-            $isInfo = (int)($_POST['is_info'] ?? 0);
-            
-            if ($isInfo) {
-                // info.php 的邏輯：只檢查目標語系是否已有該模組的資料
-                $menuKey = $moduleConfig['menuKey'] ?? null;
-                $menuValue = $moduleConfig['menuValue'] ?? null;
-                
-                $checkExistSql = "SELECT {$primaryKey} FROM {$tableName} WHERE {$langField} = :lang";
-                $checkParams = [':lang' => $targetLang];
-                
-                // 如果有 menuKey，加入條件（例如：d_class1 = 'popInfo'）
-                if ($menuKey && $menuValue !== null) {
-                    $checkExistSql .= " AND {$menuKey} = :menuValue";
-                    $checkParams[':menuValue'] = $menuValue;
-                }
-                
-                $checkExistSql .= " LIMIT 1";
-                
-                $checkExistStmt = $conn->prepare($checkExistSql);
-                $checkExistStmt->execute($checkParams);
-                $existingId = $checkExistStmt->fetchColumn();
-                
-                // 如果目標語系已存在資料
-                if ($existingId) {
-                    if (!$overwrite) {
-                        // 未勾選覆蓋，拋出錯誤
-                        $moduleName = $moduleConfig['moduleName'] ?? $module;
-                        throw new Exception("目標語系 ({$targetLang}) 已存在 {$moduleName} 的資料，請勾選「覆蓋已存在的資料」");
-                    }
-                    
-                    // 勾選覆蓋，先刪除舊資料和關聯檔案
-                    // 1. 刪除關聯的檔案記錄和實體檔案
-                    $sqlOldFiles = "SELECT * FROM file_set WHERE {$fileFk} = :id";
-                    $stmtOldFiles = $conn->prepare($sqlOldFiles);
-                    $stmtOldFiles->execute([':id' => $existingId]);
-                    $oldFiles = $stmtOldFiles->fetchAll(PDO::FETCH_ASSOC);
-                    
-                    foreach ($oldFiles as $oldFile) {
-                        // 刪除實體檔案
-                        foreach (['file_link1', 'file_link2', 'file_link3', 'file_link4', 'file_link5'] as $linkKey) {
-                            if (!empty($oldFile[$linkKey])) {
-                                $filePath = "../" . $oldFile[$linkKey];
-                                if (file_exists($filePath)) {
-                                    @unlink($filePath);
-                                }
-                            }
-                        }
-                    }
-                    
-                    // 2. 刪除檔案記錄
-                    $sqlDeleteFiles = "DELETE FROM file_set WHERE {$fileFk} = :id";
-                    $stmtDeleteFiles = $conn->prepare($sqlDeleteFiles);
-                    $stmtDeleteFiles->execute([':id' => $existingId]);
-                    
-                    // 3. 刪除主資料
-                    $sqlDelete = "DELETE FROM {$tableName} WHERE {$primaryKey} = :id";
-                    $stmtDelete = $conn->prepare($sqlDelete);
-                    $stmtDelete->execute([':id' => $existingId]);
-                }
-            }
-            
-            // 3. 準備插入資料
-            unset($rowData[$primaryKey]); // 移除主鍵
-            $rowData[$langField] = $targetLang; // 設定目標語系
-            
-            // 處理 slug
-            if (isset($rowData['d_slug']) && !empty($rowData['d_slug'])) {
-                $rowData['d_slug'] .= '-' . $targetLang;
-            }
-            if (isset($rowData['t_slug']) && !empty($rowData['t_slug'])) {
-                $rowData['t_slug'] .= '-' . $targetLang;
+            unset($rowData[$primaryKey]);
+            $rowData[$langField] = $targetLang;
+
+            // 如果指定了新的父 ID，則使用之 (用於遞迴複製子層)
+            if ($newParentId !== null && $parentIdField) {
+                $rowData[$parentIdField] = $newParentId;
             }
 
-            // 【新增】智慧分類對應
+            // 同語系複製，標題加副本
+            if ($sourceLang === $targetLang) {
+                $titleField = $moduleConfig['cols']['title'] ?? 'd_title';
+                if (isset($rowData[$titleField])) {
+                    $rowData[$titleField] .= ' (副本)';
+                }
+            }
+
+            // Slug 處理
+            foreach (['d_slug', 't_slug'] as $slugField) {
+                if (isset($rowData[$slugField]) && !empty($rowData[$slugField])) {
+                    $rowData[$slugField] = FormProcessElement::ensureUniqueSlug(
+                        $conn, $tableName, $slugField, $rowData[$slugField], 
+                        0, ['lang' => $targetLang], $moduleConfig
+                    );
+                }
+            }
+
+            // 分類與排序處理
             $hasCategory = $moduleConfig['listPage']['hasCategory'] ?? false;
             $categoryField = $moduleConfig['listPage']['categoryField'] ?? '';
             $categoryName = $moduleConfig['listPage']['categoryName'] ?? '';
-            $oldCatTitle = ''; // 【修正】初始化變數
-
+            
             if ($hasCategory && $categoryField && !empty($rowData[$categoryField]) && $categoryName) {
                 $oldCatId = $rowData[$categoryField];
-                
-                // 1. 改為直接讀取分類模組的設定檔 (解決 cms_menus 資料不全的問題)
                 $catConfigFile = __DIR__ . "/set/{$categoryName}Set.php";
-                
                 if (file_exists($catConfigFile)) {
                     $catConfig = require $catConfigFile;
                     $cTable = $catConfig['tableName'] ?? '';
                     $cPK = $catConfig['primaryKey'] ?? '';
-                    // 嘗試從 cols 中找 title 欄位，預設為 d_title 或 t_name
                     $cTitleCol = $catConfig['cols']['title'] ?? ($cTable == 'taxonomies' ? 't_name' : 'd_title');
-
-                    // 確保必要資訊存在才能進行對應
                     if ($cTable && $cPK && $cTitleCol) {
-                        try {
-                            // 2. 獲取原始分類的名稱
-                            $oldCatSql = "SELECT {$cTitleCol} FROM {$cTable} WHERE {$cPK} = :id";
-                            $oldCatStmt = $conn->prepare($oldCatSql);
-                            $oldCatStmt->execute([':id' => $oldCatId]);
-                            $oldCatTitle = $oldCatStmt->fetchColumn();
-
-                            if ($oldCatTitle) {
-                                // 3. 在目標語系中找同名的分類
-                                $newCatSql = "SELECT {$cPK} FROM {$cTable} WHERE {$cTitleCol} = :title AND lang = :lang LIMIT 1";
-                                $newCatStmt = $conn->prepare($newCatSql);
-                                $newCatStmt->execute([':title' => $oldCatTitle, ':lang' => $targetLang]);
-                                $newCatId = $newCatStmt->fetchColumn();
-
-                                if ($newCatId) {
-                                    $rowData[$categoryField] = $newCatId; // 成功對應到目標語系的分類
-                                } else {
-                                    // 找不到對應分類，清空為 0
-                                    $rowData[$categoryField] = 0; 
-                                }
-                            } else {
-                                // 原始分類名稱不存在，清空為 0
-                                $rowData[$categoryField] = 0;
-                            }
-                        } catch (Exception $e) {
-                            $rowData[$categoryField] = 0;
+                        $oldCatSql = "SELECT {$cTitleCol} FROM {$cTable} WHERE {$cPK} = :id";
+                        $oldCatStmt = $conn->prepare($oldCatSql);
+                        $oldCatStmt->execute([':id' => $oldCatId]);
+                        $oldCatTitle = $oldCatStmt->fetchColumn();
+                        if ($oldCatTitle) {
+                            $newCatSql = "SELECT {$cPK} FROM {$cTable} WHERE {$cTitleCol} = :title AND lang = :lang LIMIT 1";
+                            $newCatStmt = $conn->prepare($newCatSql);
+                            $newCatStmt->execute([':title' => $oldCatTitle, ':lang' => $targetLang]);
+                            $newCatId = $newCatStmt->fetchColumn();
+                            if ($newCatId) $rowData[$categoryField] = $newCatId;
+                            else $rowData[$categoryField] = 0;
                         }
-                    } else {
-                         $rowData[$categoryField] = 0;
                     }
-                } else {
-                     $rowData[$categoryField] = 0;
                 }
             }
 
-            // 【修正】重新計算目標語系的排序號碼
             $sortField = $moduleConfig['cols']['sort'] ?? 'd_sort';
             if (isset($rowData[$sortField])) {
-                // 建立排序計數器的 key
+                // 建立排序計數器的 key (層級隔離：不同 parent_id 應該有獨立的排序計數)
                 $sortKey = $targetLang;
-                if ($hasCategory && $categoryField && isset($rowData[$categoryField]) && $rowData[$categoryField] > 0) {
-                    $sortKey .= '_cat_' . $rowData[$categoryField];
+                if ($hasHierarchy && $parentIdField && isset($rowData[$parentIdField])) {
+                    $sortKey .= '_pid_' . (int)$rowData[$parentIdField];
                 }
                 
+                // 如果該模組有區分選單/類型
                 $menuKey = $moduleConfig['menuKey'] ?? null;
                 $menuValue = $moduleConfig['menuValue'] ?? null;
                 if ($menuKey && $menuValue !== null) {
                     $sortKey .= '_menu_' . $menuValue;
                 }
                 
-                // 【修正】如果這是第一筆，初始化計數器為 0
+                // 初始化計數器 (第一次執行時，從該 Scope 已有的最大序號開始)
                 if (!isset($sortCounter[$sortKey])) {
-                    $sortCounter[$sortKey] = 0;
+                    $scopeWhere = ["{$langField} = :lang"];
+                    $scopeParams = [':lang' => $targetLang];
+                    
+                    if ($hasHierarchy && $parentIdField) {
+                        $pIdValue = (int)($rowData[$parentIdField] ?? 0);
+                        if ($pIdValue > 0) {
+                            $scopeWhere[] = "{$parentIdField} = :pid";
+                            $scopeParams[':pid'] = $pIdValue;
+                        } else {
+                            $scopeWhere[] = "({$parentIdField} = 0 OR {$parentIdField} IS NULL)";
+                        }
+                    }
+                    if ($menuKey && $menuValue !== null) {
+                        $scopeWhere[] = "{$menuKey} = :menuValue";
+                        $scopeParams[':menuValue'] = $menuValue;
+                    }
+                    
+                    $sqlCount = "SELECT MAX({$sortField}) FROM {$tableName} WHERE " . implode(' AND ', $scopeWhere);
+                    $stmtCount = $conn->prepare($sqlCount);
+                    $stmtCount->execute($scopeParams);
+                    $maxSort = (int)$stmtCount->fetchColumn();
+                    $sortCounter[$sortKey] = $maxSort;
                 }
                 
-                // 遞增並設定排序號碼（從 1 開始）
+                // 遞增並設定排序號碼
                 $sortCounter[$sortKey]++;
                 $rowData[$sortField] = $sortCounter[$sortKey];
             }
 
+            // 執行插入
             $columns = array_keys($rowData);
             $values = array_values($rowData);
             $placeholders = implode(',', array_fill(0, count($columns), '?'));
             $colList = implode(',', $columns);
-            
             $sqlInsert = "INSERT INTO {$tableName} ($colList) VALUES ($placeholders)";
             $stmtInsert = $conn->prepare($sqlInsert);
             $stmtInsert->execute($values);
-            
             $newId = $conn->lastInsertId();
-            
-            // 【修正】主資料插入成功後立即計數
             $successCount++;
-            
-            // 4. 複製關連檔案 (file_set)
-            try {
-                $sqlFiles = "SELECT * FROM file_set WHERE {$fileFk} = :oldId";
-                $stmtFiles = $conn->prepare($sqlFiles);
-                $stmtFiles->execute([':oldId' => $itemId]);
-                $files = $stmtFiles->fetchAll(PDO::FETCH_ASSOC);
-                
-                foreach ($files as $file) {
-                    unset($file['file_id']); // 移除檔案主鍵
-                    $file[$fileFk] = $newId; // 關連到新紀錄
-                    
-                    // 【修正】依據 photo_process.php 規範與使用者需求
-                    $destBaseName = (!empty($oldCatTitle)) ? $oldCatTitle : $module;
-                    // 淨化名稱 (移除不合法字元) - 修正 regex 語法
-                    $destBaseName = preg_replace('/[^\p{L}\p{N}\s_-]/u', '', $destBaseName ?? '');
-                    $destBaseName = str_replace(' ', '_', $destBaseName ?? '');
-                    // 如果清理後變成空字串，使用模組名稱作為備用
-                    if (empty($destBaseName)) {
-                        $destBaseName = $module;
-                    }
 
-                    foreach (['file_link1', 'file_link2', 'file_link3', 'file_link4', 'file_link5'] as $linkKey) {
-                        if (!empty($file[$linkKey])) {
-                            $srcPath = "../" . $file[$linkKey];
-                            
-                            if (file_exists($srcPath)) {
-                                // 【修正】保持原始目錄結構，只複製檔案
-                                $pathInfo = pathinfo($file[$linkKey]);
-                                $originalDir = $pathInfo['dirname'];  // 例如: upload_image/history
-                                $ext = $pathInfo['extension'];
-                                
-                                // 使用相同的目錄，只是檔名不同
-                                $destRelDir = $originalDir . "/";
-                                $destAbsDir = "../" . $destRelDir;
-                                
-                                if (!is_dir($destAbsDir)) {
-                                    @mkdir($destAbsDir, 0777, true);
-                                }
+            // 複製檔案
+            $sqlFiles = "SELECT * FROM file_set WHERE {$fileFk} = :oldId";
+            $stmtFiles = $conn->prepare($sqlFiles);
+            $stmtFiles->execute([':oldId' => $itemId]);
+            $fileIdMap = [];
+            foreach ($stmtFiles->fetchAll(PDO::FETCH_ASSOC) as $file) {
+                $oldFileId = $file['file_id'];
+                unset($file['file_id']);
+                $file[$fileFk] = $newId;
 
-                                if (is_dir($destAbsDir)) {
-                                    // 產生新檔名：模組名_時間戳_隨機數.ext
-                                    $newFileName = $module . "_" . date('YmdHis') . "_" . rand(100, 999) . "." . $ext;
-                                    $destPath = $destAbsDir . $newFileName;
-                                    
-                                    if (@copy($srcPath, $destPath)) {
-                                        $file[$linkKey] = $destRelDir . $newFileName;
-                                    }
-                                }
+                // 【修正】為每個檔案記錄生成唯一的基礎檔名（類似 upload_process.php 的邏輯）
+                $basePhotoName = md5($module . $newId . $oldFileId . time() . rand(1000, 9999));
+
+                foreach (['file_link1', 'file_link2', 'file_link3', 'file_link4', 'file_link5'] as $linkKey) {
+                    if (!empty($file[$linkKey])) {
+                        $srcPath = "../" . $file[$linkKey];
+                        if (file_exists($srcPath)) {
+                            $pathInfo = pathinfo($file[$linkKey]);
+                            $destRelDir = $pathInfo['dirname'] . "/";
+                            $destAbsDir = "../" . $destRelDir;
+                            if (!is_dir($destAbsDir)) @mkdir($destAbsDir, 0777, true);
+
+                            // 【修正】根據原始檔名的後綴來生成新檔名
+                            // 例如：原始 file_link1 = "popInfo_abc.png"
+                            //      原始 file_link2 = "popInfo_abc_s100.png"
+                            //      原始 file_link3 = "popInfo_abc_s460.png"
+                            $originalBasename = $pathInfo['filename']; // 不含副檔名
+                            $extension = $pathInfo['extension'];
+
+                            // 檢查是否有尺寸後綴（_s100, _s460 等）
+                            if (preg_match('/_s\d+$/', $originalBasename, $matches)) {
+                                // 有尺寸後綴，保留它
+                                $suffix = $matches[0]; // 例如 "_s100"
+                                $newFileName = $module . "_" . $basePhotoName . $suffix . "." . $extension;
+                            } else {
+                                // 沒有後綴，這是原始大圖
+                                $newFileName = $module . "_" . $basePhotoName . "." . $extension;
+                            }
+
+                            if (@copy($srcPath, $destAbsDir . $newFileName)) {
+                                $file[$linkKey] = $destRelDir . $newFileName;
                             }
                         }
                     }
-
-                    $fCols = array_keys($file);
-                    $fValues = array_values($file);
-                    $fPlaceholders = implode(',', array_fill(0, count($fCols), '?'));
-                    $fColList = implode(',', $fCols);
-                    
-                    $sqlInsertFile = "INSERT INTO file_set ($fColList) VALUES ($fPlaceholders)";
-                    $stmtInsertFile = $conn->prepare($sqlInsertFile);
-                    $stmtInsertFile->execute($fValues);
                 }
-            } catch (Exception $fileEx) {
-                // 檔案複製失敗不影響主資料，只記錄警告
-                $errors[] = "ID {$itemId}: 主資料複製成功，但檔案複製時發生錯誤 - " . $fileEx->getMessage();
+                $fCols = array_keys($file);
+                $fPlaceholders = implode(',', array_fill(0, count($fCols), '?'));
+                $stmtInsertFile = $conn->prepare("INSERT INTO file_set (" . implode(',', $fCols) . ") VALUES ($fPlaceholders)");
+                $stmtInsertFile->execute(array_values($file));
+                $fileIdMap[$oldFileId] = $conn->lastInsertId();
             }
 
-        } catch (Exception $innerEx) {
-            // 主資料插入失敗
-            $errorMsg = "ID {$itemId}: " . $innerEx->getMessage() . " (檔案: " . $innerEx->getFile() . ", 行: " . $innerEx->getLine() . ")";
+            // 複製動態欄位
+            $stmtDynamic = $conn->prepare("SELECT * FROM data_dynamic_fields WHERE df_d_id = :oldId");
+            $stmtDynamic->execute([':oldId' => $itemId]);
+            foreach ($stmtDynamic->fetchAll(PDO::FETCH_ASSOC) as $df) {
+                unset($df['df_id']);
+                $df['df_d_id'] = $newId;
+                if (!empty($df['df_file_id']) && isset($fileIdMap[$df['df_file_id']])) $df['df_file_id'] = $fileIdMap[$df['df_file_id']];
+                $dfCols = array_keys($df);
+                $dfPlaceholders = implode(',', array_fill(0, count($dfCols), '?'));
+                $conn->prepare("INSERT INTO data_dynamic_fields (" . implode(',', $dfCols) . ") VALUES ($dfPlaceholders)")->execute(array_values($df));
+            }
+
+            // 複製分類關聯 (Taxonomy Map)
+            if ($moduleConfig['listPage']['useTaxonomyMapSort'] ?? false) {
+                require_once __DIR__ . '/includes/taxonomyMapHelper.php';
+                if (hasTaxonomyMapTable($conn)) {
+                    foreach (getTaxonomyMapWithLevels($conn, $itemId) as $m) {
+                        $newTaxId = 0;
+                        if ($sourceLang === $targetLang) {
+                            $newTaxId = $m['t_id'];
+                        } else if ($categoryName) {
+                            $catConfigFile = __DIR__ . "/set/{$categoryName}Set.php";
+                            if (file_exists($catConfigFile)) {
+                                $catConfig = require $catConfigFile;
+                                $cTable = $catConfig['tableName'] ?? 'taxonomies';
+                                $cPK = $catConfig['primaryKey'] ?? 't_id';
+                                $cTitleCol = $catConfig['cols']['title'] ?? ($cTable == 'taxonomies' ? 't_name' : 'd_title');
+                                $stmtOldCat = $conn->prepare("SELECT {$cTitleCol} FROM {$cTable} WHERE {$cPK} = :id");
+                                $stmtOldCat->execute([':id' => $m['t_id']]);
+                                $oldName = $stmtOldCat->fetchColumn();
+                                if ($oldName) {
+                                    $stmtNewCat = $conn->prepare("SELECT {$cPK} FROM {$cTable} WHERE {$cTitleCol} = :title AND lang = :lang LIMIT 1");
+                                    $stmtNewCat->execute([':title' => $oldName, ':lang' => $targetLang]);
+                                    $newTaxId = $stmtNewCat->fetchColumn();
+                                }
+                            }
+                        }
+                        if ($newTaxId > 0) {
+                            // 【新增】計算新關聯在目標分類中的初始排序 (Max + 1)
+                            $stmtMax = $conn->prepare("
+                                SELECT MAX(dtm.sort_num) 
+                                FROM data_taxonomy_map dtm
+                                INNER JOIN {$tableName} ds ON dtm.d_id = ds.{$primaryKey}
+                                WHERE dtm.t_id = ? AND dtm.map_level = ? AND ds.lang = ?
+                            ");
+                            $stmtMax->execute([$newTaxId, $m['map_level'], $targetLang]);
+                            $newSortNum = (int)$stmtMax->fetchColumn() + 1;
+
+                            $conn->prepare("INSERT INTO data_taxonomy_map (d_id, t_id, map_level, sort_num) VALUES (?, ?, ?, ?)")
+                                 ->execute([$newId, $newTaxId, $m['map_level'], $newSortNum]);
+                        }
+                    }
+                }
+            }
+
+            // --- ⭐ 遞迴複製子層 ⭐ ---
+            if ($hasHierarchy && $parentIdField) {
+                $sqlChildren = "SELECT {$primaryKey} FROM {$tableName} WHERE {$parentIdField} = :id";
+                $stmtChildren = $conn->prepare($sqlChildren);
+                $stmtChildren->execute([':id' => $itemId]);
+                $childrenIds = $stmtChildren->fetchAll(PDO::FETCH_COLUMN);
+                foreach ($childrenIds as $childId) {
+                    $cloneItem($childId, $newId);
+                }
+            }
+
+        } catch (Throwable $e) {
+            $errorMsg = "ID {$itemId}: " . $e->getMessage();
             $errors[] = $errorMsg;
             file_put_contents('debug_clone_error.log', date('Y-m-d H:i:s') . " - " . $errorMsg . "\n", FILE_APPEND);
         }
-    }
-    
-    // 【新增】重新整理排序邏輯 (Re-sort)
-    // 針對此次操作涉及的 unique scope 進行重排
-    
-    // 1. 整理涉及的 Scope
-    // key: {targetLang}_{menuValue}_{catId}_{parentId}
-    // scopeData: [whereSql, params]
-    $scopesToResort = [];
-    $menuKey = $moduleConfig['menuKey'] ?? null;
-    $menuValue = $moduleConfig['menuValue'] ?? null;
-    $sortField = $moduleConfig['cols']['sort'] ?? 'd_sort';
-    $hasCategory = $moduleConfig['listPage']['hasCategory'] ?? false;
-    $categoryField = $moduleConfig['listPage']['categoryField'] ?? '';
-    $hasHierarchy = $moduleConfig['listPage']['hasHierarchy'] ?? false;
-    $parentIdField = $moduleConfig['cols']['parent_id'] ?? null;
-    $col_delete_time = $moduleConfig['cols']['delete_time'] ?? 'd_delete_time';
+    };
 
-    // 由於我們無法精確知道每次 clone 後的分類 ID (智慧對應)，
-    // 我們採取較為寬鬆的策略：重新整理目標語系下，該模組的所有資料排序
-    // 或者，比較精確的做法是：重新整理 targetLang 下的整個模組排序 (通常模組資料量不大，這樣最保險且簡單)
-    
-    // 構建重排查詢條件
-    $resortWhere = ["1=1"];
-    $resortParams = [];
-    
-    // 條件 1: 語系
-    if ($targetLang) {
-        $resortWhere[] = "{$langField} = :lang";
-        $resortParams[':lang'] = $targetLang;
+    foreach ($itemIds as $itemId) {
+        $cloneItem($itemId);
     }
     
-    // 條件 2: Menu (模組過濾)
-    if ($menuKey && $menuValue !== null) {
-        $resortWhere[] = "{$menuKey} = :menuValue";
-        $resortParams[':menuValue'] = $menuValue;
-    }
+    // --- ⭐ 全域重排 (增強版：支援多層級獨立重排與 Taxonomy Map) ⭐ ---
+    require_once __DIR__ . '/includes/UnifiedSortManager.php';
+    UnifiedSortManager::updateAfterDataChange($conn, $moduleConfig, null, [
+        'lang' => $targetLang
+    ]);
     
-    // 條件 3: 排除軟刪除
-    $checkDelCol = $conn->query("SHOW COLUMNS FROM {$tableName} LIKE '{$col_delete_time}'");
-    if ($checkDelCol->rowCount() > 0) {
-        $resortWhere[] = "{$col_delete_time} IS NULL";
-    }
-
-    $whereSql = implode(" AND ", $resortWhere);
-    
-    // 2. 為了支援分類排序與置頂，我們需要更複雜的排序邏輯
-    // 但通常批次重排是為了消除間隙。
-    // 我們依照目前的排序欄位 ASC 排列，然後依序更新為 1, 2, 3...
-    
-    // 查詢所有 ID
-    // 注意：如果有分類，通常希望分類內排序。但如果資料表是共用的 (如 data_set)，
-    // 跨分類的 d_sort 應該是連續的嗎？通常 CMS 是 "Global Sort" 或是 "Category Scoped Sort"
-    // 從 list.php 判斷，若有分類，通常會有 FIND_IN_SET 或是 Map Table。
-    // 為了安全起見，若是簡單模組，我們直接全域重排。
-    // 若是分類模組，可能需要針對每個分類重排？
-    // 鑑於 user 只說 "重新幫我整理排序"，我們採取「依照現有 d_sort 順序，重新編號為連續整數」的策略
-    
-    // 查詢該語系下的所有資料，按 d_sort ASC, d_id ASC 排序
-    $sqlGetAll = "SELECT {$primaryKey} FROM {$tableName} WHERE {$whereSql} ORDER BY {$sortField} ASC, {$primaryKey} ASC";
-    $stmtGetAll = $conn->prepare($sqlGetAll);
-    $stmtGetAll->execute($resortParams);
-    $allIds = $stmtGetAll->fetchAll(PDO::FETCH_COLUMN);
-    
-    // 開始更新
-    $sqlUpdateSort = "UPDATE {$tableName} SET {$sortField} = :newSort WHERE {$primaryKey} = :id";
-    $stmtUpdateSort = $conn->prepare($sqlUpdateSort);
-    
-    $newSortNum = 1;
-    foreach ($allIds as $rId) {
-        $stmtUpdateSort->execute([
-            ':newSort' => $newSortNum,
-            ':id' => $rId
-        ]);
-        $newSortNum++;
-    }
-    
-    
-    $conn->commit(); // Commit transaction if all items processed without critical errors
-
+    $conn->commit();
     echo json_encode([
         'success' => true,
         'count' => $successCount,
         'errors' => $errors,
-        'message' => "成功複製 {$successCount} 筆資料" . (!empty($errors) ? "，但有 " . count($errors) . " 筆失敗" : "")
+        'message' => "成功複製 {$successCount} 筆資料 (含子層與完整排序重整)"
     ]);
     
-} catch (Exception $e) {
-    if (isset($conn) && $conn->inTransaction()) {
-        $conn->rollBack(); // Rollback on any critical error
-    }
+} catch (Throwable $e) {
+    if (isset($conn) && $conn->inTransaction()) $conn->rollBack();
     if (ob_get_length()) ob_clean();
-    
-    // 【新增】更詳細的錯誤訊息
-    $errorDetails = [
-        'success' => false,
-        'message' => $e->getMessage(),
-        'file' => $e->getFile(),
-        'line' => $e->getLine(),
-        'trace' => $e->getTraceAsString()
-    ];
-    
-    echo json_encode($errorDetails);
+    echo json_encode(['success' => false, 'message' => $e->getMessage()]);
 }

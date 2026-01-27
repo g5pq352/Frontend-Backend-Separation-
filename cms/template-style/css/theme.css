@@ -21632,7 +21632,7 @@ html.dark .mailbox-compose .bootstrap-tagsinput > input {
 	color: #FFF;
 }
 
-#draggable_image{
+.draggable_image{
 	gap: 16px;
     display: flex;
     flex-direction: column;

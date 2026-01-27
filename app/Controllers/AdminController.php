@@ -4,6 +4,7 @@ namespace App\Controllers;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 use Exception;
+use PDO;
 
 class AdminController extends Controller
 {
@@ -23,7 +24,7 @@ class AdminController extends Controller
     }
 
     /**
-     * 通用刪除 API
+     * 通用刪除 API (支援單筆與批次)
      */
     public function delete(Request $request, Response $response, array $args)
     {
@@ -31,12 +32,22 @@ class AdminController extends Controller
             $this->requireAdmin();
             $data = $request->getParsedBody();
             $module = preg_replace('/[^a-zA-Z0-9_]/', '', $data['module'] ?? '');
-            $id = intval($data['id'] ?? 0);
 
-            if (empty($module) || $id <= 0) return $this->jsonResponse($response, '缺少參數', 400);
+            // 支援單一 ID 或批次 ID
+            $idStr = $data['item_ids'] ?? ($data['id'] ?? ($data['item_id'] ?? ''));
+            $itemIds = is_array($idStr) ? $idStr : (strpos($idStr, ',') !== false ? explode(',', $idStr) : [$idStr]);
+            $itemIds = array_filter(array_map('intval', $itemIds));
+
+            if (empty($module) || empty($itemIds)) return $this->jsonResponse($response, '缺少參數', 400);
+
+            // 【新增】接收 trash 參數，判斷是否在垃圾桶內
+            $isTrashMode = !empty($data['trash']) && $data['trash'] == '1';
 
             require_once BASE_PATH_CMS . '/includes/elements/PermissionElement.php';
             require_once BASE_PATH_CMS . '/includes/elements/ModuleConfigElement.php';
+            require_once BASE_PATH_CMS . '/includes/taxonomyMapHelper.php';
+            require_once BASE_PATH_CMS . '/includes/SortReorganizer.php';
+            require_once BASE_PATH_CMS . '/includes/UnifiedSortManager.php';
             
             list($canView, $canAdd, $canEdit, $canDelete) = \PermissionElement::checkModulePermission($this->pdo, $module);
             if (!$canDelete) return $this->jsonResponse($response, '無刪除權限', 403);
@@ -48,7 +59,6 @@ class AdminController extends Controller
             $col_delete_time = $cols['delete_time'] ?? 'd_delete_time';
             $col_sort = $cols['sort'] ?? 'd_sort';
             $col_file_fk = $cols['file_fk'] ?? 'file_d_id';
-            $categoryField = $moduleConfig['listPage']['categoryField'] ?? null;
             $parentIdField = $cols['parent_id'] ?? null;
             $menuKey = $moduleConfig['menuKey'] ?? null;
             $menuValue = $moduleConfig['menuValue'] ?? null;
@@ -57,137 +67,478 @@ class AdminController extends Controller
 
             $this->pdo->beginTransaction();
 
-            $stmt = $this->pdo->prepare("SELECT * FROM {$tableName} WHERE {$col_id} = :id");
-            $stmt->execute([':id' => $id]);
-            $itemToDelete = $stmt->fetch(\PDO::FETCH_ASSOC);
-            if (!$itemToDelete) throw new Exception('找不到資料');
+            // 收集受影響的分類資訊 (用於後續重排)
+            $affectedMappings = [];
+            $itemLang = null;
+            $itemsToDelete = []; // 收集要刪除的項目資訊
+            $categoriesWithArticles = []; // 初始化，用於收集有文章的分類
 
-            // 判斷軟硬刪
-            $hasTrashConfig = $moduleConfig['listPage']['hasTrash'] ?? null;
-            $hasHierarchy = $moduleConfig['listPage']['hasHierarchy'] ?? false;
-            
-            // 如果是無限層結構，一律走硬刪除流程 (使用者要求直接刪除，不要進回收桶)
-            $isSoftDelete = ($hasTrashConfig !== false && !empty($col_delete_time) && !$hasHierarchy);
-            if ($isSoftDelete) {
-                // 檢查資料表是否有該欄位 (快取建議過後可優化)
-                $check = $this->pdo->prepare("SHOW COLUMNS FROM {$tableName} LIKE '{$col_delete_time}'");
-                $check->execute();
-                if ($check->rowCount() == 0) $isSoftDelete = false;
-            }
+            // 第一階段：收集資訊並判斷刪除類型
+            foreach ($itemIds as $id) {
+                $stmt = $this->pdo->prepare("SELECT * FROM {$tableName} WHERE {$col_id} = :id");
+                $stmt->execute([':id' => $id]);
+                $itemToDelete = $stmt->fetch(PDO::FETCH_ASSOC);
+                if (!$itemToDelete) continue;
 
-            // --- 階層式模組的偵測與兩階段刪除邏輯 ---
-            if ($hasHierarchy) {
-                $dependencyCount = 0;
-                $dependencyTypes = [];
+                $itemLang = $itemToDelete['lang'] ?? null;
 
-                // 1. 偵測子項目 (同一張表)
-                if ($parentIdField) {
+                // 判斷軟硬刪
+                $hasTrashConfig = $moduleConfig['listPage']['hasTrash'] ?? null;
+                $hasHierarchy = $moduleConfig['listPage']['hasHierarchy'] ?? false;
+
+                // 【還原】階層結構不使用軟刪除，避免複雜的垃圾桶管理問題
+                // 【新增】在垃圾桶內時，強制使用硬刪除（永久刪除）
+                $isSoftDelete = ($hasTrashConfig !== false && !empty($col_delete_time) && !$hasHierarchy && !$isTrashMode);
+                if ($isSoftDelete) {
+                    $check = $this->pdo->prepare("SHOW COLUMNS FROM {$tableName} LIKE '{$col_delete_time}'");
+                    $check->execute();
+                    if ($check->rowCount() == 0) $isSoftDelete = false;
+                }
+                
+                // 【新增】批次刪除時，檢查文章關聯（只在非強制模式下檢查）
+                // 只有當刪除的是分類資料表(taxonomies)時才需要檢查文章關聯
+                if (!$force && hasTaxonomyMapTable($this->pdo) && $tableName === 'taxonomies') {
+                    $articleQuery = "SELECT COUNT(*) as article_count FROM data_taxonomy_map WHERE t_id = :id";
+                    $articleStmt = $this->pdo->prepare($articleQuery);
+                    $articleStmt->execute([':id' => $id]);
+                    $articleResult = $articleStmt->fetch(PDO::FETCH_ASSOC);
+                    $articleCount = (int)$articleResult['article_count'];
+
+                    if ($articleCount > 0) {
+                        // 收集有文章的分類資訊
+                        $titleField = $cols['title'] ?? 't_name';
+                        $categoryName = $itemToDelete[$titleField] ?? "ID: {$id}";
+
+                        $categoriesWithArticles[] = "{$categoryName}（{$articleCount} 篇文章）";
+                    }
+                }
+
+                // 【修改】支援級聯軟刪除
+                $cascade = !empty($data['cascade']);
+                $descendantIds = [];
+                
+                if ($hasHierarchy && $parentIdField && $id === $itemIds[0]) {
+                    // 檢查是否有子項目
                     $stmtChild = $this->pdo->prepare("SELECT COUNT(*) FROM {$tableName} WHERE {$parentIdField} = :id");
                     $stmtChild->execute([':id' => $id]);
                     $childCount = $stmtChild->fetchColumn();
+                    
                     if ($childCount > 0) {
-                        $dependencyCount += $childCount;
-                        $dependencyTypes[] = "{$childCount} 筆子分類";
-                    }
-                }
-
-                // 2. 偵測關聯文章 (假設模組名稱為 XxxxCate 或 XxxxKey，對應 Xxxx 模組)
-                if (strpos($module, 'Cate') !== false || strpos($module, 'Key') !== false) {
-                    $mainModule = str_replace(['Cate', 'Key'], '', $module);
-                    $mainConfigFile = BASE_PATH_CMS . "/set/{$mainModule}Set.php";
-                    if (file_exists($mainConfigFile)) {
-                        require_once BASE_PATH_CMS . '/includes/elements/ModuleConfigElement.php';
-                        $mainConfig = \ModuleConfigElement::loadConfig($mainModule);
-                        $articleTable = $mainConfig['tableName'];
-                        $articleCategoryField = $mainConfig['listPage']['categoryField'] ?? null;
-                        
-                        if ($articleTable && $articleCategoryField) {
-                            $stmtArt = $this->pdo->prepare("SELECT COUNT(*) FROM {$articleTable} WHERE {$articleCategoryField} = :id");
-                            $stmtArt->execute([':id' => $id]);
-                            $articleCount = $stmtArt->fetchColumn();
-                            if ($articleCount > 0) {
-                                $dependencyCount += $articleCount;
-                                $dependencyTypes[] = "{$articleCount} 筆文章內容";
-                            }
+                        if ($cascade || $isSoftDelete) {
+                            // 級聯刪除或軟刪除：遞迴收集所有子孫項目
+                            $descendantIds = $this->getDescendantIds($tableName, $id, $parentIdField);
+                        } else {
+                            // 硬刪除且未指定 cascade：阻止刪除
+                            return $this->jsonResponse($response, ['message' => "此分類下尚有子項目。", 'has_data' => true], 200);
                         }
                     }
                 }
 
-                if ($dependencyCount > 0 && !$force) {
-                    return $this->jsonResponse($response, [
-                        'message' => "此分類下尚有 " . implode('、', $dependencyTypes) . "。",
-                        'has_data' => true
-                    ], 200); // 使用 200 讓前端判斷 has_data
+                // 【核心】取得受影響的 Mapping 資訊 (用於後續重排)
+                if (hasTaxonomyMapTable($this->pdo)) {
+                    $mappings = getTaxonomyMapWithLevels($this->pdo, $id);
+                    foreach ($mappings as $m) $affectedMappings[] = $m;
+                }
+
+                // 記錄要刪除的項目
+                $itemsToDelete[] = [
+                    'id' => $id,
+                    'isSoftDelete' => $isSoftDelete
+                ];
+                
+                // 【新增】如果有子孫項目，也加入刪除列表
+                if (!empty($descendantIds)) {
+                    foreach ($descendantIds as $descendantId) {
+                        // 收集子孫的 mapping 資訊
+                        if (hasTaxonomyMapTable($this->pdo)) {
+                            $mappings = getTaxonomyMapWithLevels($this->pdo, $descendantId);
+                            foreach ($mappings as $m) $affectedMappings[] = $m;
+                        }
+                        
+                        // 加入刪除列表（使用相同的刪除類型）
+                        $itemsToDelete[] = [
+                            'id' => $descendantId,
+                            'isSoftDelete' => $isSoftDelete
+                        ];
+                    }
                 }
             }
 
-            if ($isSoftDelete) {
-                $this->pdo->prepare("UPDATE {$tableName} SET {$col_delete_time} = NOW() WHERE {$col_id} = :id")->execute([':id' => $id]);
-                
-                // 【新增】清理 data_taxonomy_map 記錄
-                require_once BASE_PATH_CMS . '/includes/taxonomyMapHelper.php';
-                if (hasTaxonomyMapTable($this->pdo)) {
-                    // 取得該產品的所有分類，用於重新整理排序
-                    $taxonomiesStmt = $this->pdo->prepare("SELECT DISTINCT t_id FROM data_taxonomy_map WHERE d_id = :d_id");
-                    $taxonomiesStmt->execute([':d_id' => $id]);
-                    $affectedTaxonomies = $taxonomiesStmt->fetchAll(\PDO::FETCH_COLUMN);
-                    
-                    // 刪除 data_taxonomy_map 記錄
-                    deleteTaxonomyMap($this->pdo, $id);
-                    
-                    // 重新整理受影響分類的排序
-                    foreach ($affectedTaxonomies as $taxId) {
-                        reorderTaxonomyMap($this->pdo, intval($taxId));
+            // 【修改】如果發現有文章關聯,根據刪除類型決定處理方式
+            if (!empty($categoriesWithArticles)) {
+                // 檢查是否為軟刪除
+                $firstItem = $itemsToDelete[0] ?? null;
+                $isSoftDeleteMode = $firstItem['isSoftDelete'] ?? false;
+
+                if ($isSoftDeleteMode) {
+                    // 【新增】軟刪除模式：顯示提示訊息，詢問是否繼續
+                    // 如果沒有 confirm 參數，先顯示提示訊息
+                    if (empty($data['confirm'])) {
+                        $message = implode("\n", $categoriesWithArticles);
+                        return $this->jsonResponse($response, [
+                            'success' => false,
+                            'needs_confirm' => true,
+                            'is_soft_delete' => true,
+                            'message' => $message,
+                            'categories_info' => $categoriesWithArticles
+                        ], 200);
+                    }
+                    // 如果有 confirm 參數，繼續執行軟刪除
+                } else {
+                    // 硬刪除模式:需要 force 才能永久刪除
+                    if (!$force) {
+                        $message = "以下分類有關聯的文章，將被永久刪除：\n" . implode("\n", $categoriesWithArticles);
+                        return $this->jsonResponse($response, [
+                            'success' => false,
+                            'has_data' => true,
+                            'needs_force' => true,
+                            'is_soft_delete' => false,
+                            'message' => $message,
+                            'categories_info' => $categoriesWithArticles
+                        ], 200);
                     }
                 }
-                
-                // 遞補排序
-                if (!empty($col_sort)) {
-                    $this->reorderAfterDelete($tableName, $col_sort, $itemToDelete[$col_sort], $categoryField, $itemToDelete[$categoryField] ?? null, $parentIdField, $itemToDelete[$parentIdField] ?? null, $menuKey, $menuValue, $col_delete_time, $itemToDelete['lang'] ?? null);
-                }
-            } else {
-                // 硬刪除
-                // 如果是階層式且執意刪除，理論上應該遞迴刪除或串聯刪除。
-                // 這裡目前實作：刪除自身，如果有關聯文章也一併刪除 (比照 ajax_permanent_delete.php)
-                
-                if ($hasHierarchy && $force) {
-                    // 若有文章，先刪除文章 (簡單實作，不進入遞迴子分類)
-                    if (strpos($module, 'Cate') !== false || strpos($module, 'Key') !== false) {
-                        $mainModule = str_replace(['Cate', 'Key'], '', $module);
-                        $mainConfigFile = BASE_PATH_CMS . "/set/{$mainModule}Set.php";
-                        if (file_exists($mainConfigFile)) {
-                            $mainConfig = \ModuleConfigElement::loadConfig($mainModule);
-                            $articleTable = $mainConfig['tableName'];
-                            $articleCategoryField = $mainConfig['listPage']['categoryField'] ?? null;
-                            $articleFileFk = $mainConfig['cols']['file_fk'] ?? 'file_d_id';
-                            
-                            if ($articleTable && $articleCategoryField) {
-                                // 刪除文章的檔案
-                                $stmtArts = $this->pdo->prepare("SELECT {$mainConfig['primaryKey']} as id FROM {$articleTable} WHERE {$articleCategoryField} = :id");
-                                $stmtArts->execute([':id' => $id]);
-                                $arts = $stmtArts->fetchAll(\PDO::FETCH_ASSOC);
-                                foreach ($arts as $art) {
-                                    $this->cleanupFiles($art['id'], $articleFileFk);
-                                    $this->pdo->prepare("DELETE FROM file_set WHERE {$articleFileFk} = :id")->execute([':id' => $art['id']]);
+            }
+
+            // 【修改】處理關聯的文章 - 混合方案
+            if (hasTaxonomyMapTable($this->pdo) && $tableName === 'taxonomies') {
+                foreach ($itemIds as $categoryId) {
+                    // 查詢使用此分類的文章 ID
+                    $articleQuery = "SELECT DISTINCT d_id FROM data_taxonomy_map WHERE t_id = :categoryId";
+                    $articleStmt = $this->pdo->prepare($articleQuery);
+                    $articleStmt->execute([':categoryId' => $categoryId]);
+                    $articleIds = $articleStmt->fetchAll(PDO::FETCH_COLUMN);
+
+                    if (!empty($articleIds)) {
+                        // 找出文章所屬的資料表
+                        $dataTableName = 'data_set';
+                        $dataDeleteTimeCol = 'd_delete_time';
+
+                        // 檢查第一個項目的刪除類型
+                        $firstItem = $itemsToDelete[0] ?? null;
+                        $isSoftDeleteMode = $firstItem['isSoftDelete'] ?? false;
+
+                        foreach ($articleIds as $articleId) {
+                            // 【關鍵】檢查文章屬於幾個分類
+                            $categoryCountQuery = "SELECT COUNT(DISTINCT t_id) as category_count
+                                                   FROM data_taxonomy_map
+                                                   WHERE d_id = :articleId";
+                            $categoryCountStmt = $this->pdo->prepare($categoryCountQuery);
+                            $categoryCountStmt->execute([':articleId' => $articleId]);
+                            $categoryCountResult = $categoryCountStmt->fetch(PDO::FETCH_ASSOC);
+                            $categoryCount = (int)$categoryCountResult['category_count'];
+
+                            if ($categoryCount <= 1) {
+                                // 文章只屬於一個分類,跟著分類一起處理
+                                if ($isSoftDeleteMode) {
+                                    // 【軟刪除】將文章移到垃圾桶
+                                    $checkCol = $this->pdo->prepare("SHOW COLUMNS FROM {$dataTableName} LIKE '{$dataDeleteTimeCol}'");
+                                    $checkCol->execute();
+                                    if ($checkCol->rowCount() > 0) {
+                                        $this->pdo->prepare("UPDATE {$dataTableName} SET {$dataDeleteTimeCol} = NOW() WHERE d_id = :id")
+                                                  ->execute([':id' => $articleId]);
+                                    }
+                                } else {
+                                    // 【硬刪除】永久刪除文章(需要 force)
+                                    if ($force) {
+                                        // 先刪除文章的附件檔案
+                                        $this->cleanupFiles($articleId, 'file_d_id');
+
+                                        // 刪除 file_set 中的記錄
+                                        $deleteFileStmt = $this->pdo->prepare("DELETE FROM file_set WHERE file_d_id = :id");
+                                        $deleteFileStmt->execute([':id' => $articleId]);
+
+                                        // 硬刪除文章
+                                        $deleteArticleStmt = $this->pdo->prepare("DELETE FROM {$dataTableName} WHERE d_id = :id");
+                                        $deleteArticleStmt->execute([':id' => $articleId]);
+
+                                        // 刪除文章的 mapping
+                                        $deleteMappingStmt = $this->pdo->prepare("DELETE FROM data_taxonomy_map WHERE d_id = :id");
+                                        $deleteMappingStmt->execute([':id' => $articleId]);
+                                    }
                                 }
-                                $this->pdo->prepare("DELETE FROM {$articleTable} WHERE {$articleCategoryField} = :id")->execute([':id' => $id]);
+                            } else {
+                                // 文章屬於多個分類,只移除該分類的關聯,文章保留
+                                // 不做任何處理,mapping 會在後面的階段被刪除
                             }
                         }
                     }
-                    // 子分類如果也要強刪，目前邏輯是直接斷掉連結(變孤兒)或執意刪除單一項？
-                    // 考量使用者可能預期「全清」，這裡我們目前至少把分類下的文章清掉。
                 }
+            }
 
-                $this->cleanupFiles($id, $col_file_fk);
-                $this->pdo->prepare("DELETE FROM file_set WHERE {$col_file_fk} = :id")->execute([':id' => $id]);
-                $this->pdo->prepare("DELETE FROM {$tableName} WHERE {$col_id} = :id")->execute([':id' => $id]);
-                if (!empty($col_sort)) {
-                    $this->reorderAfterDelete($tableName, $col_sort, $itemToDelete[$col_sort], $categoryField, $itemToDelete[$categoryField] ?? null, $parentIdField, $itemToDelete[$parentIdField] ?? null, $menuKey, $menuValue, null, $itemToDelete['lang'] ?? null);
+            // 第二階段：先執行刪除操作（軟刪除會保留 mapping，硬刪除會刪除 mapping）
+            foreach ($itemsToDelete as $item) {
+                $id = $item['id'];
+                $isSoftDelete = $item['isSoftDelete'];
+
+                if ($isSoftDelete) {
+                    // 軟刪除：只更新 delete_time，保留 mapping
+                    $this->pdo->prepare("UPDATE {$tableName} SET {$col_delete_time} = NOW() WHERE {$col_id} = :id")->execute([':id' => $id]);
+                } else {
+                    // 硬刪除：先標記為軟刪除（讓重排邏輯能正確過濾），稍後再真正刪除
+                    if (!empty($col_delete_time)) {
+                        $checkCol = $this->pdo->prepare("SHOW COLUMNS FROM {$tableName} LIKE '{$col_delete_time}'");
+                        $checkCol->execute();
+                        if ($checkCol->rowCount() > 0) {
+                            $this->pdo->prepare("UPDATE {$tableName} SET {$col_delete_time} = NOW() WHERE {$col_id} = :id")->execute([':id' => $id]);
+                        }
+                    }
+                }
+            }
+
+            // 第三階段：重排序（此時軟刪除的資料會被過濾，硬刪除的資料也被標記為軟刪除）
+            $configUseTaxonomyMapSort = $moduleConfig['listPage']['useTaxonomyMapSort'] ?? false;
+
+            if ($configUseTaxonomyMapSort && !empty($affectedMappings)) {
+                // 重排受影響的分類
+                require_once BASE_PATH_CMS . '/includes/taxonomyMapHelper.php';
+                $processedCategories = [];
+                foreach ($affectedMappings as $m) {
+                    $key = $m['t_id'] . '_' . ($m['map_level'] ?? 1);
+                    if (!isset($processedCategories[$key])) {
+                        reorderTaxonomyMap($this->pdo, intval($m['t_id']), intval($m['map_level'] ?? 1), [
+                            $menuKey => $menuValue,
+                            'lang' => $itemLang
+                        ], $tableName);
+                        $processedCategories[$key] = true;
+                    }
+                }
+            }
+
+            // 【重要】無論是否使用 taxonomy map，都要重排主表排序（用於「全部」視圖）
+            \UnifiedSortManager::updateAfterDataChange($this->pdo, $moduleConfig, null, [
+                'lang' => $itemLang
+            ]);
+
+            // 第四階段：真正執行硬刪除（刪除檔案、file_set、主表資料、mapping）
+            foreach ($itemsToDelete as $item) {
+                $id = $item['id'];
+                $isSoftDelete = $item['isSoftDelete'];
+
+                if (!$isSoftDelete) {
+                    // 硬刪除：清理檔案和資料
+                    $this->cleanupFiles($id, $col_file_fk);
+                    $this->pdo->prepare("DELETE FROM file_set WHERE {$col_file_fk} = :id")->execute([':id' => $id]);
+                    $this->pdo->prepare("DELETE FROM {$tableName} WHERE {$col_id} = :id")->execute([':id' => $id]);
+                    if (hasTaxonomyMapTable($this->pdo)) {
+                        deleteTaxonomyMap($this->pdo, $id);
+                    }
                 }
             }
 
             $this->pdo->commit();
             return $this->jsonResponse($response, '刪除成功');
+        } catch (Exception $e) {
+            if ($this->pdo->inTransaction()) $this->pdo->rollBack();
+            $this->log("Error in " . __METHOD__ . ": " . $e->getMessage());
+            return $this->jsonResponse($response, $e->getMessage(), $e->getCode() ?: 500);
+        }
+    }
+
+    /**
+     * 還原資料 API (支援單筆與批次)
+     */
+    public function restore(Request $request, Response $response, array $args)
+    {
+        try {
+            $this->requireAdmin();
+            $data = $request->getParsedBody();
+            $module = preg_replace('/[^a-zA-Z0-9_]/', '', $data['module'] ?? '');
+            
+            // 支援單一 ID 或批次 ID
+            $idStr = $data['item_ids'] ?? ($data['id'] ?? ($data['item_id'] ?? ''));
+            $itemIds = is_array($idStr) ? $idStr : (strpos($idStr, ',') !== false ? explode(',', $idStr) : [$idStr]);
+            $itemIds = array_filter(array_map('intval', $itemIds));
+
+            if (empty($module) || empty($itemIds)) return $this->jsonResponse($response, '缺少參數', 400);
+
+            require_once BASE_PATH_CMS . '/includes/elements/PermissionElement.php';
+            require_once BASE_PATH_CMS . '/includes/elements/ModuleConfigElement.php';
+            require_once BASE_PATH_CMS . '/includes/taxonomyMapHelper.php';
+            require_once BASE_PATH_CMS . '/includes/SortReorganizer.php';
+            require_once BASE_PATH_CMS . '/includes/UnifiedSortManager.php';
+            
+            list($canView, $canAdd, $canEdit, $canDelete) = \PermissionElement::checkModulePermission($this->pdo, $module);
+            if (!$canEdit) return $this->jsonResponse($response, '無編輯權限', 403);
+
+            $moduleConfig = \ModuleConfigElement::loadConfig($module);
+            $tableName = $moduleConfig['tableName'];
+            $col_id = $moduleConfig['primaryKey'];
+            $cols = $moduleConfig['cols'] ?? [];
+            $col_delete_time = $cols['delete_time'] ?? 'd_delete_time';
+            $col_sort = $cols['sort'] ?? 'd_sort';
+            $parentIdField = $cols['parent_id'] ?? null;
+            $menuKey = $moduleConfig['menuKey'] ?? null;
+            $menuValue = $moduleConfig['menuValue'] ?? null;
+
+            $this->pdo->beginTransaction();
+
+            $affectedMappings = [];
+            $itemLang = null;
+            $categoriesToRestore = []; // 收集需要還原的分類
+            $articlesToRestore = []; // 收集需要還原的文章
+
+            foreach ($itemIds as $id) {
+                // 取得項目資訊
+                $stmt = $this->pdo->prepare("SELECT * FROM {$tableName} WHERE {$col_id} = :id");
+                $stmt->execute([':id' => $id]);
+                $item = $stmt->fetch(PDO::FETCH_ASSOC);
+                if (!$item) continue;
+
+                $itemLang = $item['lang'] ?? null;
+
+                // 收集受影響的分類資訊
+                if (hasTaxonomyMapTable($this->pdo)) {
+                    $mappings = getTaxonomyMapWithLevels($this->pdo, $id);
+                    foreach ($mappings as $m) $affectedMappings[] = $m;
+
+                    // 【新增】如果還原的是文章，檢查關聯的分類是否在垃圾桶
+                    if ($tableName === 'data_set') {
+                        foreach ($mappings as $m) {
+                            $categoryId = $m['t_id'];
+
+                            // 檢查分類是否在垃圾桶（使用正確的欄位名稱）
+                            $checkStmt = $this->pdo->prepare("
+                                SELECT t_id, t_name, deleted_at FROM taxonomies
+                                WHERE t_id = :id
+                                AND (deleted_at IS NOT NULL AND deleted_at != '0000-00-00 00:00:00')
+                            ");
+                            $checkStmt->execute([':id' => $categoryId]);
+                            $deletedCategory = $checkStmt->fetch(PDO::FETCH_ASSOC);
+
+                            if ($deletedCategory) {
+                                // 記錄需要還原的分類（避免重複）
+                                if (!isset($categoriesToRestore[$categoryId])) {
+                                    $categoriesToRestore[$categoryId] = $deletedCategory['t_name'];
+                                }
+                            }
+                        }
+                    }
+
+                    // 【新增】如果還原的是分類，檢查關聯的文章是否在垃圾桶
+                    if ($tableName === 'taxonomies') {
+                        // 查詢使用此分類的文章
+                        $articleQuery = "
+                            SELECT DISTINCT ds.d_id, ds.d_title
+                            FROM data_taxonomy_map dtm
+                            INNER JOIN data_set ds ON dtm.d_id = ds.d_id
+                            WHERE dtm.t_id = :categoryId
+                            AND (ds.d_delete_time IS NOT NULL AND ds.d_delete_time != '0000-00-00 00:00:00')
+                        ";
+                        $articleStmt = $this->pdo->prepare($articleQuery);
+                        $articleStmt->execute([':categoryId' => $id]);
+                        $deletedArticles = $articleStmt->fetchAll(PDO::FETCH_ASSOC);
+
+                        foreach ($deletedArticles as $article) {
+                            // 檢查文章是否只屬於這個分類
+                            $categoryCountQuery = "
+                                SELECT COUNT(DISTINCT t_id) as category_count
+                                FROM data_taxonomy_map
+                                WHERE d_id = :articleId
+                            ";
+                            $categoryCountStmt = $this->pdo->prepare($categoryCountQuery);
+                            $categoryCountStmt->execute([':articleId' => $article['d_id']]);
+                            $categoryCountResult = $categoryCountStmt->fetch(PDO::FETCH_ASSOC);
+                            $categoryCount = (int)$categoryCountResult['category_count'];
+
+                            // 只還原只屬於這個分類的文章
+                            if ($categoryCount <= 1) {
+                                if (!isset($articlesToRestore[$article['d_id']])) {
+                                    $articlesToRestore[$article['d_id']] = $article['d_title'];
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 執行還原
+                $this->pdo->prepare("UPDATE {$tableName} SET {$col_delete_time} = NULL WHERE {$col_id} = :id")
+                          ->execute([':id' => $id]);
+            }
+
+            // 【新增】自動還原關聯的分類
+            if (!empty($categoriesToRestore)) {
+                $this->log("Auto-restoring categories for restored articles: " . implode(', ', array_keys($categoriesToRestore)));
+
+                foreach (array_keys($categoriesToRestore) as $categoryId) {
+                    // 還原分類
+                    $this->pdo->prepare("UPDATE taxonomies SET deleted_at = NULL WHERE t_id = :id")
+                              ->execute([':id' => $categoryId]);
+
+                    // 收集分類的 mapping 資訊（用於後續重排）
+                    if (hasTaxonomyMapTable($this->pdo)) {
+                        $categoryMappings = getTaxonomyMapWithLevels($this->pdo, $categoryId);
+                        foreach ($categoryMappings as $m) {
+                            $affectedMappings[] = $m;
+                        }
+                    }
+                }
+            }
+
+            // 【新增】自動還原關聯的文章
+            if (!empty($articlesToRestore)) {
+                $this->log("Auto-restoring articles for restored category: " . implode(', ', array_keys($articlesToRestore)));
+
+                foreach (array_keys($articlesToRestore) as $articleId) {
+                    // 還原文章
+                    $this->pdo->prepare("UPDATE data_set SET d_delete_time = NULL WHERE d_id = :id")
+                              ->execute([':id' => $articleId]);
+
+                    // 收集文章的 mapping 資訊（用於後續重排）
+                    if (hasTaxonomyMapTable($this->pdo)) {
+                        $articleMappings = getTaxonomyMapWithLevels($this->pdo, $articleId);
+                        foreach ($articleMappings as $m) {
+                            $affectedMappings[] = $m;
+                        }
+                    }
+                }
+            }
+
+            // -------------------------------------------------------------
+            // 【重要】還原後使用統一排序管理器進行全域與分類重排
+            // -------------------------------------------------------------
+            $configUseTaxonomyMapSort = $moduleConfig['listPage']['useTaxonomyMapSort'] ?? false;
+
+            if ($configUseTaxonomyMapSort && !empty($affectedMappings)) {
+                // 重排受影響的分類
+                require_once BASE_PATH_CMS . '/includes/taxonomyMapHelper.php';
+                $processedCategories = [];
+                foreach ($affectedMappings as $m) {
+                    $key = $m['t_id'] . '_' . ($m['map_level'] ?? 1);
+                    if (!isset($processedCategories[$key])) {
+                        reorderTaxonomyMap($this->pdo, intval($m['t_id']), intval($m['map_level'] ?? 1), [
+                            $menuKey => $menuValue,
+                            'lang' => $itemLang
+                        ], $tableName);
+                        $processedCategories[$key] = true;
+                    }
+                }
+            }
+
+            // 【重要】無論是否使用 taxonomy map，都要重排主表排序（用於「全部」視圖）
+            \UnifiedSortManager::updateAfterDataChange($this->pdo, $moduleConfig, null, [
+                'lang' => $itemLang
+            ]);
+
+            $this->pdo->commit();
+
+            // 【新增】組合還原成功訊息
+            $messages = [];
+            if (!empty($categoriesToRestore)) {
+                $categoryNames = implode('、', $categoriesToRestore);
+                $messages[] = "同時已自動還原關聯的分類：{$categoryNames}";
+            }
+            if (!empty($articlesToRestore)) {
+                $articleCount = count($articlesToRestore);
+                $messages[] = "同時已自動還原 {$articleCount} 篇關聯的文章";
+            }
+
+            if (!empty($messages)) {
+                $message = "還原成功！" . implode('；', $messages);
+                return $this->jsonResponse($response, $message);
+            }
+
+            return $this->jsonResponse($response, '還原成功');
         } catch (Exception $e) {
             if ($this->pdo->inTransaction()) $this->pdo->rollBack();
             $this->log("Error in " . __METHOD__ . ": " . $e->getMessage());
@@ -210,11 +561,10 @@ class AdminController extends Controller
             if (empty($module) || $itemId <= 0) return $this->jsonResponse($response, '缺少參數', 400);
 
             require_once BASE_PATH_CMS . '/includes/elements/ModuleConfigElement.php';
-
             $moduleConfig = \ModuleConfigElement::loadConfig($module);
             $tableName = $moduleConfig['tableName'];
             $primaryKey = $moduleConfig['primaryKey'];
-            $col_active = $moduleConfig['cols']['active'] ?? 'd_active';
+            $col_active = preg_replace('/[^a-zA-Z0-9_]/', '', $data['field'] ?? ($moduleConfig['cols']['active'] ?? 'd_active'));
 
             $sql = "UPDATE {$tableName} SET {$col_active} = :new_value WHERE {$primaryKey} = :item_id";
             $this->pdo->prepare($sql)->execute([':new_value' => $newValue, ':item_id' => $itemId]);
@@ -231,176 +581,191 @@ class AdminController extends Controller
     public function changeSort(Request $request, Response $response, array $args)
     {
         try {
-            $data = $request->getParsedBody();
-            $this->log("ChangeSort Request: " . json_encode($data));
-            
             $this->requireAdmin();
+            $data = $request->getParsedBody();
             $module = preg_replace('/[^a-zA-Z0-9_]/', '', $data['module'] ?? '');
             $itemId = intval($data['item_id'] ?? 0);
             $newSort = intval($data['new_sort'] ?? 0);
-            $categoryId = intval($data['category_id'] ?? 0); // 【新增】接收分類 ID
+            $categoryId = intval($data['category_id'] ?? 0);
 
             if (empty($module) || $itemId <= 0 || $newSort <= 0) return $this->jsonResponse($response, '缺少參數', 400);
 
             require_once BASE_PATH_CMS . '/includes/elements/ModuleConfigElement.php';
             require_once BASE_PATH_CMS . '/includes/taxonomyMapHelper.php';
+            require_once BASE_PATH_CMS . '/includes/SortReorganizer.php';
+            require_once BASE_PATH_CMS . '/includes/UnifiedSortManager.php';
 
             $moduleConfig = \ModuleConfigElement::loadConfig($module);
             $tableName = $moduleConfig['tableName'];
             $primaryKey = $moduleConfig['primaryKey'];
             $cols = $moduleConfig['cols'] ?? [];
             $col_sort = $cols['sort'] ?? 'd_sort';
-            $col_top = $cols['top'] ?? null;
-            $categoryField = $moduleConfig['listPage']['categoryField'] ?? null;
             $parentIdField = $cols['parent_id'] ?? null;
             $menuKey = $moduleConfig['menuKey'] ?? null;
             $menuValue = $moduleConfig['menuValue'] ?? null;
+            $configUseTaxonomyMapSort = $moduleConfig['listPage']['useTaxonomyMapSort'] ?? false;
 
             $this->pdo->beginTransaction();
 
             $stmt = $this->pdo->prepare("SELECT * FROM {$tableName} WHERE {$primaryKey} = :id");
             $stmt->execute([':id' => $itemId]);
-            $item = $stmt->fetch(\PDO::FETCH_ASSOC);
+            $item = $stmt->fetch(PDO::FETCH_ASSOC);
             if (!$item) throw new Exception('找不到資料');
 
-            // 【新增】檢查是否使用 data_taxonomy_map 排序
-            $useMapTableSort = false;
-            // 讀取設定檔中的 useTaxonomyMapSort，預設為 true
-            $configUseTaxonomyMapSort = $moduleConfig['listPage']['useTaxonomyMapSort'] ?? true;
-            
-            if ($categoryId > 0 && hasTaxonomyMapTable($this->pdo) && $configUseTaxonomyMapSort) {
-                $useMapTableSort = true;
-            }
-            
-            $this->log("useMapTableSort: " . ($useMapTableSort ? 'true' : 'false') . ", categoryId: {$categoryId}");
+            $useMapTableSort = ($categoryId > 0 && hasTaxonomyMapTable($this->pdo) && $configUseTaxonomyMapSort);
 
-            // 【移動】檢查置頂項目是否可排序 (需要在 $useMapTableSort 定義之後)
-            if ($item) {
-                 // 【修正】判斷是否為置頂項目
-                 $isPinned = false;
-                 
-                 if ($useMapTableSort) {
-                     // 如果是 Map Sort，檢查 Map 表的 d_top
-                     $checkMapTop = $this->pdo->prepare("SELECT d_top FROM data_taxonomy_map WHERE d_id = :id AND t_id = :c_id");
-                     $checkMapTop->execute([':id' => $itemId, ':c_id' => $categoryId]);
-                     $mapRow = $checkMapTop->fetch(\PDO::FETCH_ASSOC);
-                     if ($mapRow && ($mapRow['d_top'] ?? 0) == 1) {
-                         $isPinned = true;
-                     }
-                 } else {
-                     // 如果是普通 Sort，檢查 data_set 的 d_top (且必須在非分類模式下的全域排序，或分類排序但禁用MapSort時...等一下)
-                     // 邏輯回顧：
-                     // 1. 全域列表 (categoryId=0)：檢查 data_set.d_top。如果 pinned, 則不可排。
-                     // 2. 分類列表 + MapSort=true：檢查 map.d_top。如果 pinned, 則不可排。
-                     // 3. 分類列表 + MapSort=false：視為普通列表。此時 Global Pin 的項目在此列表中是普通項目，可排。
-                     
-                     // 所以這裡只要檢查: 如果我是「依靠 d_top 排序」的模式，且該項目是 pinned，則不可排。
-                     // Case 1: 全域 -> useMapTableSort=false, categoryId=0. -> 依 data_set.d_top 排. -> 檢查 item[d_top].
-                     // Case 3: 分類 -> useMapTableSort=false, categoryId>0. -> 忽略 data_set.d_top (改用 d_sort/d_date). -> item[d_top] 不影響排序. -> isPinned = false.
-                     
-                     // 因此：
-                     $isGlobalSort = ($categoryId == 0); // 或是 categoryId 不是有效過濾
-                     if ($isGlobalSort && ($item[$col_top] ?? 0) == 1) {
-                         $isPinned = true;
-                     }
-                 }
-
-                 if ($isPinned) {
-                     throw new Exception('置頂項目無法調整排序');
-                 }
-            }
-
+            // 【關鍵修正】插入式排序：將項目插入到目標位置，其他項目順移
             if ($useMapTableSort) {
-                // 使用 data_taxonomy_map 排序
-                $this->log("Using taxonomy map sort for category {$categoryId}");
-                
-                // 1. 取得當前排序
-                $mapStmt = $this->pdo->prepare("SELECT sort_num FROM data_taxonomy_map WHERE d_id = :d_id AND t_id = :t_id");
-                $mapStmt->execute([':d_id' => $itemId, ':t_id' => $categoryId]);
-                $mapRow = $mapStmt->fetch(\PDO::FETCH_ASSOC);
-                if (!$mapRow) throw new Exception('找不到分類關聯');
-                
-                $oldSort = intval($mapRow['sort_num']);
-                if ($oldSort === $newSort) {
-                    $this->pdo->commit();
-                    return $this->jsonResponse($response, '無需更新');
+                // 在分類視圖下排序
+                // 1. 取得當前項目的舊排序值
+                $stmtOld = $this->pdo->prepare("SELECT sort_num FROM data_taxonomy_map WHERE d_id = :id AND t_id = :tid");
+                $stmtOld->execute([':id' => $itemId, ':tid' => $categoryId]);
+                $oldSort = $stmtOld->fetchColumn();
+
+                if ($oldSort && $oldSort != $newSort) {
+                    // 2. 根據移動方向調整其他項目的排序
+                    if ($oldSort < $newSort) {
+                        // 向下移動：將 oldSort+1 到 newSort 之間的項目往上移（-1）
+                        $this->pdo->prepare("
+                            UPDATE data_taxonomy_map dtm
+                            INNER JOIN {$tableName} ds ON dtm.d_id = ds.{$primaryKey}
+                            SET dtm.sort_num = dtm.sort_num - 1
+                            WHERE dtm.t_id = :tid
+                            AND dtm.sort_num > :old_sort
+                            AND dtm.sort_num <= :new_sort
+                            AND dtm.d_id != :id
+                            AND (dtm.d_top = 0 OR dtm.d_top IS NULL)
+                        ")->execute([
+                            ':tid' => $categoryId,
+                            ':old_sort' => $oldSort,
+                            ':new_sort' => $newSort,
+                            ':id' => $itemId
+                        ]);
+                    } else {
+                        // 向上移動：將 newSort 到 oldSort-1 之間的項目往下移（+1）
+                        $this->pdo->prepare("
+                            UPDATE data_taxonomy_map dtm
+                            INNER JOIN {$tableName} ds ON dtm.d_id = ds.{$primaryKey}
+                            SET dtm.sort_num = dtm.sort_num + 1
+                            WHERE dtm.t_id = :tid
+                            AND dtm.sort_num >= :new_sort
+                            AND dtm.sort_num < :old_sort
+                            AND dtm.d_id != :id
+                            AND (dtm.d_top = 0 OR dtm.d_top IS NULL)
+                        ")->execute([
+                            ':tid' => $categoryId,
+                            ':new_sort' => $newSort,
+                            ':old_sort' => $oldSort,
+                            ':id' => $itemId
+                        ]);
+                    }
                 }
-                
-                $this->log("Moving from {$oldSort} to {$newSort}");
 
-                // 2. 移動其他產品的排序
-                if ($newSort < $oldSort) {
-                    // 向上移動：將 [newSort, oldSort) 範圍內的項目 +1
-                    $shiftSql = "UPDATE data_taxonomy_map SET sort_num = sort_num + 1 
-                                WHERE t_id = :t_id AND sort_num >= :new_sort AND sort_num < :old_sort";
-                } else {
-                    // 向下移動：將 (oldSort, newSort] 範圍內的項目 -1
-                    $shiftSql = "UPDATE data_taxonomy_map SET sort_num = sort_num - 1 
-                                WHERE t_id = :t_id AND sort_num > :old_sort AND sort_num <= :new_sort";
-                }
-                
-                $stmtShift = $this->pdo->prepare($shiftSql);
-                $stmtShift->execute([':t_id' => $categoryId, ':new_sort' => $newSort, ':old_sort' => $oldSort]);
-                $this->log("Shifted " . $stmtShift->rowCount() . " items");
-
-                // 3. 更新目標產品的排序
-                $updateStmt = $this->pdo->prepare("UPDATE data_taxonomy_map SET sort_num = :new_sort WHERE d_id = :d_id AND t_id = :t_id");
-                $updateResult = $updateStmt->execute([':new_sort' => $newSort, ':d_id' => $itemId, ':t_id' => $categoryId]);
-                
-                $this->log("Update result: " . ($updateResult ? 'success' : 'failed'));
-
+                // 3. 更新當前項目的排序值
+                $this->pdo->prepare("UPDATE data_taxonomy_map SET sort_num = :new_sort WHERE d_id = :id AND t_id = :tid")
+                          ->execute([':new_sort' => $newSort, ':id' => $itemId, ':tid' => $categoryId]);
             } else {
-                // 使用原本的 d_sort 排序
-                $oldSort = intval($item[$col_sort]);
-                if ($oldSort === $newSort) return $this->jsonResponse($response, '無需更新');
+                // 在全部視圖下排序
+                // 1. 取得當前項目的舊排序值
+                $oldSort = $item[$col_sort] ?? null;
 
-                // 建立過濾條件
-                $where = ["1=1"];
-                $params = [];
-                if ($menuKey && $menuValue !== null) {
-                    $where[] = "{$menuKey} = :menuValue";
-                    $params[':menuValue'] = $menuValue;
-                }
-                // 【修正】如果在分類模式下（且不使用 MapSort），不用排除置頂項目
-                // 這樣置頂項目也可以在分類下被拖曳排序 (更新 d_sort)
-                if ($col_top !== null && !empty($isCategorySort)) {
-                    $where[] = "{$col_top} = 0";
-                }
-                
-                if ($categoryField && isset($item[$categoryField])) {
-                    $where[] = "{$categoryField} = :cat";
-                    $params[':cat'] = $item[$categoryField];
-                }
-                if ($parentIdField && isset($item[$parentIdField])) {
-                    $where[] = "{$parentIdField} = :parent";
-                    $params[':parent'] = $item[$parentIdField];
-                }
-                if (isset($item['lang'])) {
-                    $where[] = "lang = :lang";
-                    $params[':lang'] = $item['lang'];
+                if ($oldSort && $oldSort != $newSort) {
+                    // 2. 建立查詢條件
+                    $baseConditions = ["1=1"];
+                    $baseParams = [];
+
+                    if ($menuKey && $menuValue !== null) {
+                        $baseConditions[] = "{$menuKey} = :menuValue";
+                        $baseParams[':menuValue'] = $menuValue;
+                    }
+
+                    if (isset($item['lang'])) {
+                        $baseConditions[] = "lang = :lang";
+                        $baseParams[':lang'] = $item['lang'];
+                    }
+
+                    // 排除置頂項目（檢查欄位是否存在）
+                    $col_top = $cols['top'] ?? 'd_top';
+                    try {
+                        $checkTopCol = $this->pdo->prepare("SHOW COLUMNS FROM {$tableName} LIKE ?");
+                        $checkTopCol->execute([$col_top]);
+                        if ($checkTopCol->fetch()) {
+                            $baseConditions[] = "({$col_top} = 0 OR {$col_top} IS NULL)";
+                        }
+                    } catch (Exception $e) {
+                        // 欄位不存在，忽略
+                    }
+
+                    // 排除軟刪除項目（檢查欄位是否存在）
+                    $col_delete_time = $cols['delete_time'] ?? 'd_delete_time';
+                    try {
+                        $checkCol = $this->pdo->prepare("SHOW COLUMNS FROM {$tableName} LIKE ?");
+                        $checkCol->execute([$col_delete_time]);
+                        if ($checkCol->fetch()) {
+                            $baseConditions[] = "({$col_delete_time} IS NULL OR {$col_delete_time} = '0000-00-00 00:00:00')";
+                        }
+                    } catch (Exception $e) {
+                        // 欄位不存在，忽略
+                    }
+
+                    $whereBase = implode(' AND ', $baseConditions);
+
+                    // 3. 根據移動方向調整其他項目的排序
+                    if ($oldSort < $newSort) {
+                        // 向下移動：將 oldSort+1 到 newSort 之間的項目往上移（-1）
+                        $params = array_merge($baseParams, [
+                            ':old_sort' => $oldSort,
+                            ':new_sort' => $newSort,
+                            ':id' => $itemId
+                        ]);
+                        $this->pdo->prepare("
+                            UPDATE {$tableName}
+                            SET {$col_sort} = {$col_sort} - 1
+                            WHERE {$whereBase}
+                            AND {$col_sort} > :old_sort
+                            AND {$col_sort} <= :new_sort
+                            AND {$primaryKey} != :id
+                        ")->execute($params);
+                    } else {
+                        // 向上移動：將 newSort 到 oldSort-1 之間的項目往下移（+1）
+                        $params = array_merge($baseParams, [
+                            ':new_sort' => $newSort,
+                            ':old_sort' => $oldSort,
+                            ':id' => $itemId
+                        ]);
+                        $this->pdo->prepare("
+                            UPDATE {$tableName}
+                            SET {$col_sort} = {$col_sort} + 1
+                            WHERE {$whereBase}
+                            AND {$col_sort} >= :new_sort
+                            AND {$col_sort} < :old_sort
+                            AND {$primaryKey} != :id
+                        ")->execute($params);
+                    }
                 }
 
-                $whereSql = implode(' AND ', $where);
-
-                if ($newSort < $oldSort) {
-                    $shiftSql = "UPDATE {$tableName} SET {$col_sort} = {$col_sort} + 1 WHERE {$whereSql} AND {$col_sort} >= :new_sort AND {$col_sort} < :old_sort";
-                } else {
-                    $shiftSql = "UPDATE {$tableName} SET {$col_sort} = {$col_sort} - 1 WHERE {$whereSql} AND {$col_sort} > :old_sort AND {$col_sort} <= :new_sort";
-                }
-
-                $stmtShift = $this->pdo->prepare($shiftSql);
-                $shiftParams = array_merge($params, [':new_sort' => $newSort, ':old_sort' => $oldSort]);
-                $stmtShift->execute($shiftParams);
-
-                $this->pdo->prepare("UPDATE {$tableName} SET {$col_sort} = :new_sort WHERE {$primaryKey} = :id")->execute([':new_sort' => $newSort, ':id' => $itemId]);
+                // 4. 更新當前項目的排序值
+                $this->pdo->prepare("UPDATE {$tableName} SET {$col_sort} = :new_sort WHERE {$primaryKey} = :id")
+                          ->execute([':new_sort' => $newSort, ':id' => $itemId]);
             }
+
+            // -------------------------------------------------------------
+            // 【重要】排序後使用統一排序管理器進行全域與分類重排
+            // -------------------------------------------------------------
+            \UnifiedSortManager::updateAfterDataChange($this->pdo, $moduleConfig, $itemId, [
+                'lang' => $item['lang'] ?? null,
+                'categoryId' => $categoryId
+            ]);
 
             $this->pdo->commit();
             return $this->jsonResponse($response, '排序已更新');
         } catch (Exception $e) {
             if ($this->pdo->inTransaction()) $this->pdo->rollBack();
-            $this->log("Error in " . __METHOD__ . ": " . $e->getMessage());
-            return $this->jsonResponse($response, $e->getMessage(), $e->getCode() ?: 500);
+            $this->log("Error in changeSort: " . $e->getMessage() . " | Code: " . $e->getCode() . " | File: " . $e->getFile() . " | Line: " . $e->getLine());
+            // 確保狀態碼在有效範圍內 (100-599)
+            $code = $e->getCode();
+            $statusCode = ($code >= 100 && $code < 600) ? $code : 500;
+            return $this->jsonResponse($response, $e->getMessage(), $statusCode);
         }
     }
 
@@ -414,12 +779,14 @@ class AdminController extends Controller
             $data = $request->getParsedBody();
             $module = preg_replace('/[^a-zA-Z0-9_]/', '', $data['module'] ?? '');
             $itemId = intval($data['item_id'] ?? 0);
-            $requestCategoryId = isset($data['category_id']) && $data['category_id'] !== '' ? intval($data['category_id']) : null;
+            $categoryId = intval($data['category_id'] ?? 0);
 
             if (empty($module) || $itemId <= 0) return $this->jsonResponse($response, '缺少參數', 400);
 
             require_once BASE_PATH_CMS . '/includes/elements/ModuleConfigElement.php';
             require_once BASE_PATH_CMS . '/includes/taxonomyMapHelper.php';
+            require_once BASE_PATH_CMS . '/includes/SortReorganizer.php';
+            require_once BASE_PATH_CMS . '/includes/UnifiedSortManager.php';
 
             $moduleConfig = \ModuleConfigElement::loadConfig($module);
             $tableName = $moduleConfig['tableName'];
@@ -427,122 +794,79 @@ class AdminController extends Controller
             $cols = $moduleConfig['cols'] ?? [];
             $col_top = $cols['top'] ?? 'd_top';
             $col_sort = $cols['sort'] ?? 'd_sort';
-            $categoryField = $moduleConfig['listPage']['categoryField'] ?? null;
+            $parentIdField = $cols['parent_id'] ?? null;
             $menuKey = $moduleConfig['menuKey'] ?? null;
             $menuValue = $moduleConfig['menuValue'] ?? null;
+            $configUseTaxonomyMapSort = $moduleConfig['listPage']['useTaxonomyMapSort'] ?? true;
 
             $this->pdo->beginTransaction();
 
             $stmt = $this->pdo->prepare("SELECT * FROM {$tableName} WHERE {$primaryKey} = :id");
             $stmt->execute([':id' => $itemId]);
-            $item = $stmt->fetch(\PDO::FETCH_ASSOC);
+            $item = $stmt->fetch(PDO::FETCH_ASSOC);
             if (!$item) throw new Exception('找不到資料');
 
-            $newTop = ($item[$col_top] ?? 0) ? 0 : 1;
-            
-            // 【新增】檢查是否使用 data_taxonomy_map 排序 (同步檢查設定檔與資料表)
-            $useMapPin = false;
-            $configUseTaxonomyMapSort = $moduleConfig['listPage']['useTaxonomyMapSort'] ?? true;
-            $categoryId = null;
-            
-            // 優先使用前端傳來的 category_id
-            if ($requestCategoryId !== null) {
-                $categoryId = $requestCategoryId;
-            } elseif (isset($item[$categoryField])) {
-                // 向後兼容：如果沒傳，嘗試從資料本身抓取
-                $categoryId = $item[$categoryField];
-            }
-
-            // 如果使用 Map 排序，且有分類 (分類ID > 0)
-            if ($configUseTaxonomyMapSort && $categoryId > 0 && hasTaxonomyMapTable($this->pdo)) {
-                $useMapPin = true;
-            }
+            $useMapPin = ($configUseTaxonomyMapSort && $categoryId > 0 && hasTaxonomyMapTable($this->pdo));
 
             if ($useMapPin) {
-                // 【情境A】更新 data_taxonomy_map 的 d_top
-                // 若 Map 表沒有 d_top 欄位，這裡會報錯，但因為使用者確認有，我們先假定有
-                // 為了保險，我們也可以檢查欄位是否存在，但這裡直接執行
-                $checkMapTop = $this->pdo->prepare("SELECT d_top FROM data_taxonomy_map WHERE d_id = :id AND t_id = :c_id");
-                $checkMapTop->execute([':id' => $itemId, ':c_id' => $categoryId]);
-                $mapRow = $checkMapTop->fetch(\PDO::FETCH_ASSOC);
-
-                if ($mapRow) {
-                    $currentMapTop = $mapRow['d_top'] ?? 0;
-                    $newTop = ($currentMapTop == 1) ? 0 : 1;
-                    
-                    $this->pdo->prepare("UPDATE data_taxonomy_map SET d_top = :top WHERE d_id = :id AND t_id = :c_id")
-                              ->execute([':top' => $newTop, ':id' => $itemId, ':c_id' => $categoryId]);
-                              
-                    // 重整 Map 表排序
-                    // 針對該分類下，非置頂的項目重整 sort_num
-                    $stmtAll = $this->pdo->prepare("
-                        SELECT d_id FROM data_taxonomy_map 
-                        WHERE t_id = :c_id AND (d_top = 0 OR d_top IS NULL) 
-                        ORDER BY sort_num ASC, d_id ASC
-                    ");
-                    $stmtAll->execute([':c_id' => $categoryId]);
-                    $rows = $stmtAll->fetchAll(\PDO::FETCH_ASSOC);
-                    
-                    foreach ($rows as $idx => $row) {
-                        $this->pdo->prepare("UPDATE data_taxonomy_map SET sort_num = :s WHERE d_id = :id AND t_id = :c_id")
-                                  ->execute([':s' => $idx + 1, ':id' => $row['d_id'], ':c_id' => $categoryId]);
-                    }
-                } else {
-                     // 找不到 Map 記錄，fallback 到主表？不，應該報錯或忽略
-                     // 這裡我們暫時 fallback 到主表，以免邏輯斷裂，但邏輯上是不對的
-                }
-
+                // 切換 Map d_top
+                $stmtCheck = $this->pdo->prepare("SELECT d_top FROM data_taxonomy_map WHERE d_id = :id AND t_id = :tid");
+                $stmtCheck->execute([':id' => $itemId, ':tid' => $categoryId]);
+                $currentTop = $stmtCheck->fetchColumn() ?: 0;
+                $newTop = $currentTop ? 0 : 1;
+                $this->pdo->prepare("UPDATE data_taxonomy_map SET d_top = :top WHERE d_id = :id AND t_id = :tid")
+                          ->execute([':top' => $newTop, ':id' => $itemId, ':tid' => $categoryId]);
             } else {
-                // 【情境B】更新主表 data_set 的 d_top (全域置頂)
-                $this->pdo->prepare("UPDATE {$tableName} SET {$col_top} = :top WHERE {$primaryKey} = :id")->execute([':top' => $newTop, ':id' => $itemId]);
-
-                // 重整主表排序
-                $where = ["({$col_top} = 0 OR {$col_top} IS NULL)"];
-                $params = [];
-                if ($menuKey && $menuValue !== null) { $where[] = "{$menuKey} = :mv"; $params[':mv'] = $menuValue; }
-                // 注意：如果不是 Map 模式，我們通常忽略分類過濾，進行全域重整
-                // 但如果該模組有 categoryField 且我們在過濾下...
-                // 用戶之前的邏輯是：在全域下才置頂。所以在全域下重整是合理的。
-                // 如果在分類過濾下但 useTaxonomyMapSort=false，則過濾條件仍有效
-                if ($categoryField && isset($item[$categoryField])) { $where[] = "{$categoryField} = :cat"; $params[':cat'] = $item[$categoryField]; }
-                
-                $whereSql = implode(' AND ', $where);
-                
-                $stmtAll = $this->pdo->prepare("SELECT {$primaryKey} FROM {$tableName} WHERE {$whereSql} ORDER BY {$col_sort} ASC, {$primaryKey} ASC");
-                $stmtAll->execute($params);
-                $rows = $stmtAll->fetchAll(\PDO::FETCH_ASSOC);
-                
-                foreach ($rows as $idx => $row) {
-                    $this->pdo->prepare("UPDATE {$tableName} SET {$col_sort} = :s WHERE {$primaryKey} = :id")->execute([':s' => $idx + 1, ':id' => $row[$primaryKey]]);
-                }
+                // 切換主表 d_top
+                $currentTop = $item[$col_top] ?? 0;
+                $newTop = $currentTop ? 0 : 1;
+                $this->pdo->prepare("UPDATE {$tableName} SET {$col_top} = :top WHERE {$primaryKey} = :id")
+                          ->execute([':top' => $newTop, ':id' => $itemId]);
             }
 
+            // -------------------------------------------------------------
+            // 【重要】置頂後使用統一排序管理器進行全域與分類重排
+            // -------------------------------------------------------------
+            \UnifiedSortManager::updateAfterDataChange($this->pdo, $moduleConfig, $itemId, [
+                'lang' => $item['lang'] ?? null,
+                'categoryId' => $categoryId
+            ]);
+
             $this->pdo->commit();
-            return $this->jsonResponse($response, '置頂狀態已更新', 200);
+            return $this->jsonResponse($response, '置頂狀態已更新');
         } catch (Exception $e) {
             if ($this->pdo->inTransaction()) $this->pdo->rollBack();
             return $this->jsonResponse($response, $e->getMessage(), $e->getCode() ?: 500);
         }
     }
 
-    private function reorderAfterDelete($tableName, $col_sort, $deletedSort, $categoryField, $catVal, $parentIdField, $parentVal, $menuKey, $menuVal, $col_delete_time = null, $lang = null)
+    /**
+     * 遞迴取得所有子孫項目的 ID
+     */
+    private function getDescendantIds($tableName, $parentId, $parentIdField)
     {
-        $where = ["{$col_sort} > :dsort"];
-        $params = [':dsort' => $deletedSort];
-        if ($menuKey && $menuVal !== null) { $where[] = "{$menuKey} = :mv"; $params[':mv'] = $menuVal; }
-        if ($categoryField && $catVal !== null) { $where[] = "{$categoryField} = :cat"; $params[':cat'] = $catVal; }
-        if ($parentIdField && $parentVal !== null) { $where[] = "{$parentIdField} = :p"; $params[':p'] = $parentVal; }
-        if ($lang !== null) { $where[] = "lang = :lang"; $params[':lang'] = $lang; }
-        if ($col_delete_time) $where[] = "{$col_delete_time} IS NULL";
-
-        $sql = "UPDATE {$tableName} SET {$col_sort} = {$col_sort} - 1 WHERE " . implode(' AND ', $where);
-        $this->pdo->prepare($sql)->execute($params);
+        $descendants = [];
+        
+        // 查詢直接子項目
+        $stmt = $this->pdo->prepare("SELECT t_id FROM {$tableName} WHERE {$parentIdField} = :parentId");
+        $stmt->execute([':parentId' => $parentId]);
+        $children = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        
+        foreach ($children as $childId) {
+            $descendants[] = $childId;
+            // 遞迴查詢子項目的子項目
+            $grandchildren = $this->getDescendantIds($tableName, $childId, $parentIdField);
+            $descendants = array_merge($descendants, $grandchildren);
+        }
+        
+        return $descendants;
     }
+
     private function cleanupFiles($id, $col_file_fk)
     {
         $stmt = $this->pdo->prepare("SELECT * FROM file_set WHERE {$col_file_fk} = :id");
         $stmt->execute([':id' => $id]);
-        $images = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+        $images = $stmt->fetchAll(PDO::FETCH_ASSOC);
         foreach ($images as $img) {
             for ($i = 1; $i <= 5; $i++) {
                 $link = $img["file_link{$i}"] ?? '';
@@ -553,16 +877,12 @@ class AdminController extends Controller
 
     private function jsonResponse(Response $response, $message, $status = 200)
     {
-        // 如果 message 是陣列，直接使用
         if (is_array($message)) {
             $payload = json_encode(array_merge(['success' => ($status < 300)], $message), JSON_UNESCAPED_UNICODE);
         } else {
             $payload = json_encode(['success' => ($status < 300), 'message' => $message], JSON_UNESCAPED_UNICODE);
         }
-        
-        // 清除任何可能已經產生的額外輸出 (例如 PHP Notice)，避免損壞 JSON 格式
         if (ob_get_level() > 0) ob_clean();
-        
         $response->getBody()->write($payload);
         return $response->withHeader('Content-Type', 'application/json')->withStatus($status);
     }

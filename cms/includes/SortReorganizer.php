@@ -228,18 +228,37 @@ class SortReorganizer
         error_log("CategoryField: " . ($categoryField ?? 'null') . ", ParentIdField: " . ($parentIdField ?? 'null'));
         error_log("IsSoftDelete: " . ($isSoftDelete ? 'true' : 'false') . ", DeleteTimeCol: " . ($col_delete_time ?? 'null'));
 
+        // 【新增】檢查是否有 d_top 欄位
+        $hasTopField = false;
+        $col_top = 'd_top';
+        try {
+            $checkTopCol = $conn->prepare("SHOW COLUMNS FROM `{$tableName}` LIKE ?");
+            $checkTopCol->execute([$col_top]);
+            if ($checkTopCol->fetch()) {
+                $hasTopField = true;
+                error_log("Table has d_top field, will exclude pinned items from reorganization");
+            }
+        } catch (Exception $e) {
+            // 欄位不存在，忽略
+        }
+
         if ($groupField || $parentIdField || $categoryField || $lang) {
             // 找出所有分組組合
             $fields = array_filter([$groupField, $categoryField, $parentIdField]);
             if ($lang) $fields[] = 'lang'; // 加入語系分組
 
             $fieldSql = implode(', ', $fields);
-            
+
             $where = ["1=1"];
             if ($isSoftDelete && $col_delete_time) {
                 $where[] = "{$col_delete_time} IS NULL";
             }
-            
+
+            // 【新增】排除置頂項目
+            if ($hasTopField) {
+                $where[] = "({$col_top} = 0 OR {$col_top} IS NULL)";
+            }
+
             // 【新增】如果有 menuValue,只處理該群組的資料
             if ($groupField && $menuValue !== null) {
                 $where[] = "{$groupField} = " . $conn->quote($menuValue);
@@ -249,7 +268,7 @@ class SortReorganizer
             if ($lang) {
                 $where[] = "lang = " . $conn->quote($lang);
             }
-            
+
             $whereSql = implode(' AND ', $where);
 
             $groupQuery = "SELECT DISTINCT {$fieldSql} FROM `{$tableName}` WHERE {$whereSql}";
@@ -269,7 +288,12 @@ class SortReorganizer
                     $conditions[$f] = $v;
                     $groupHash .= "{$f}:{$v}|";
                 }
-                
+
+                // 【新增】加入排除置頂的條件
+                if ($hasTopField) {
+                    $conditions[$col_top] = 0;
+                }
+
                 // 避免重複處理相同的正規化群組
                 if (in_array($groupHash, $processedGroups)) {
                     continue;
@@ -287,12 +311,19 @@ class SortReorganizer
             return $totalCount;
         } else {
             // 沒有群組：全部一起處理
+            $conditions = [];
+
+            // 【新增】排除置頂項目
+            if ($hasTopField) {
+                $conditions[$col_top] = 0;
+            }
+
             return self::reorganize(
                 $conn,
                 $tableName,
                 $col_id,
                 $col_sort,
-                [],
+                $conditions,
                 $isSoftDelete,
                 $col_delete_time,
                 $parentIdField

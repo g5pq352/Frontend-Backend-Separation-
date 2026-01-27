@@ -8,16 +8,16 @@ $settingPage = [
     'menuKey' => 'taxonomy_type_id',
 
     'cols' => [
-        'date'  => 'created_at',
-        'title' => 't_name',
-        'slug'  => 't_slug',
-        'slug_source' => 't_name_en',
-        'sort' => 'sort_order',
-        'active' => 't_active',
+        'date'        => 'created_at',
+        'title'       => 't_name',
+        'slug'        => 't_slug',
+        'slug_source' => 't_name_en', // 預設slug欄位
+        'sort'        => 'sort_order',
+        'active'      => 't_active',
         'delete_time' => 'deleted_at', 
-        'parent_id' => 'parent_id',
-        'top' => null,
-        'file_fk' => 'file_t_id' // 【修正】taxonomies 表使用 file_t_id
+        'parent_id'   => 'parent_id',
+        'top'         => null,
+        'file_fk'     => 'file_t_id'
     ],
     
     'listPage' => [

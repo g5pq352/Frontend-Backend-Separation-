@@ -57,7 +57,6 @@ $settingPage = [
                     'field' => 'd_class6',
                     'label' => '作者',
                     'category' => "authorC",
-                    'useChosen' => true,
                     'multiple' => true,
                     'canCreate' => true,
                 ],
@@ -66,7 +65,6 @@ $settingPage = [
                     'field' => 'd_class7',
                     'label' => '專案',
                     'category' => "projectC",
-                    'useChosen' => true,
                     'multiple' => true,
                     'canCreate' => true,
                 ],
@@ -75,7 +73,6 @@ $settingPage = [
                     'field' => 'd_class2',
                     'label' => '類型',
                     'category' => "typeC",
-                    'useChosen' => true,
                     'multiple' => true,
                     'canCreate' => true,
                 ],
@@ -84,7 +81,6 @@ $settingPage = [
                     'field' => 'd_class3',
                     'label' => '分類',
                     'category' => "categoryC",
-                    'useChosen' => true,
                     'multiple' => true,
                     'canCreate' => true,
                 ],
@@ -93,7 +89,6 @@ $settingPage = [
                     'field' => 'd_class4',
                     'label' => '顏色',
                     'category' => "colorC",
-                    'useChosen' => true,
                     'multiple' => true,
                     'canCreate' => true,
                 ],
@@ -102,7 +97,6 @@ $settingPage = [
                     'field' => 'd_class5',
                     'label' => '標籤',
                     'category' => "tagC",
-                    'useChosen' => true,
                     'multiple' => true,
                     'canCreate' => true,
                 ],
@@ -142,7 +136,8 @@ $settingPage = [
                     'fileType' => 'portfolioCover',
                     'multiple' => false,
                     'size' => [
-                        ['w' => 1920, 'h' => 1080]
+                        ['w' => 1920, 'h' => 1080],
+                        // 'maxSize' => 3
                     ],
                     'note' => ''
                 ],

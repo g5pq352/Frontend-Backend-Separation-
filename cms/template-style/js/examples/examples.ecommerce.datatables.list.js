@@ -62,12 +62,17 @@ Theme Version: 	4.0.0
 		$(document).on('keyup', '.search-term', function(){
 			var $this = $(this),
 				$filterBy = $this.closest('.datatables-header-footer-wrapper').find('.filter-by'),
-				$dataTable = $this.closest('.datatables-header-footer-wrapper').find('.dataTable').DataTable();
+				$dataTableElement = $this.closest('.datatables-header-footer-wrapper').find('.dataTable');
 
-			if( $filterBy.val() == 'all' ) {
+			// 確保 DataTable 已經初始化
+			if ( $.fn.DataTable.isDataTable( $dataTableElement ) ) {
+				var $dataTable = $dataTableElement.DataTable();
+
+				// 清除所有欄位的搜尋條件
+				$dataTable.columns().search('');
+
+				// 執行全域搜尋
 				$dataTable.search( $this.val() ).draw();
-			} else {
-				$dataTable.column( parseInt( $filterBy.val() ) ).search( $this.val() ).draw();
 			}
 		});
 

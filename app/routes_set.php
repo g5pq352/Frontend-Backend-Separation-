@@ -114,9 +114,3 @@ $app->group('/api', function ($group) {
     // 登出
     $group->post('/logout', [\App\Controllers\AuthController::class, 'logout']);
 });
-
-# 5. 後台非同步動作 (Admin AJAX Actions)
-$app->post('/admin/delete', [\App\Controllers\AdminController::class, 'delete']);
-$app->post('/admin/toggle-active', [\App\Controllers\AdminController::class, 'toggleActive']);
-$app->post('/admin/change-sort', [\App\Controllers\AdminController::class, 'changeSort']);
-$app->post('/admin/toggle-pin', [\App\Controllers\AdminController::class, 'togglePin']);

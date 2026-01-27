@@ -179,7 +179,8 @@ function renderSelect($config, $value = '')
                     'multiple' => $multiple,
                     'imageConfig' => $imageConfig,
                     'includeRoot' => $config['includeRoot'] ?? ($field === 'parent_id' || $field === 'menu_parent_id'),
-                    'required' => $required
+                    'required' => $required,
+                    'canCreate' => $config['canCreate'] ?? false
                 ]);
             }
             elseif (isset($config['options'])) {

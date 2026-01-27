@@ -3381,6 +3381,65 @@ window.theme.fn = {
 		},
 
 		build: function() {
+			var self = this;
+			var $el = this.$el;
+
+			// 【新增】檢查是否有圖片選項 (data-img-src)
+			var hasImages = $el.find('option[data-img-src]').length > 0;
+
+			if (hasImages) {
+				// 【新增】自定義模板函數來顯示圖片
+				self.options.templateResult = function(state) {
+					if (!state.id) {
+						return state.text;
+					}
+
+					var $option = $(state.element);
+					var imgSrc = $option.data('img-src');
+
+					if (!imgSrc) {
+						return state.text;
+					}
+
+					var $result = $(
+						'<span class="select2-option-with-image">' +
+							'<img src="' + imgSrc + '" class="select2-option-image" style="width: 40px; height: 40px; object-fit: cover; margin-right: 10px; border-radius: 4px; vertical-align: middle;" /> ' +
+							'<span>' + state.text + '</span>' +
+						'</span>'
+					);
+
+					return $result;
+				};
+
+				self.options.templateSelection = function(state) {
+					if (!state.id) {
+						return state.text;
+					}
+
+					var $option = $(state.element);
+					var imgSrc = $option.data('img-src');
+
+					if (!imgSrc) {
+						return state.text;
+					}
+
+					var $selection = $(
+						'<span class="select2-selection-with-image">' +
+							'<img src="' + imgSrc + '" class="select2-selection-image" style="width: 24px; height: 24px; object-fit: cover; margin-right: 8px; border-radius: 3px; vertical-align: middle;" /> ' +
+							'<span>' + state.text + '</span>' +
+						'</span>'
+					);
+
+					return $selection;
+				};
+			}
+
+			// 【新增】支援動態新增標籤 (canCreate)
+			if ($el.data('can-create') || $el.is('[data-can-create="true"]') || $el.is('[data-tags="true"]')) {
+				this.options.tags = true;
+				this.options.tokenSeparators = [','];
+			}
+
 			this.$el.select2( this.options );
 
 			return this;

@@ -1,1 +1,1 @@
-GOODS Reference 後台登入系統
+<?php echo SYSTEM_NAME; ?>

@@ -1,16 +1,28 @@
 <?php
 /**
- * AJAX 排序處理 - 高效能優化版
- * 優化目標：5ms 內完成排序更新
+ * AJAX 排序處理 - 通用動態版
+ * 自動讀取設定檔中的欄位名稱，支援無置頂欄位的資料表
  */
-
-// 載入認證檢查
-require_once __DIR__ . '/auth_check.php';
-requireCmsAuth();
-
+session_start();
 require_once '../Connections/connect2data.php';
 
+// 【除錯】開啟錯誤顯示
+ini_set('display_errors', 1);
+error_reporting(E_ALL);
+
+// 【除錯】捕捉 Fatal Error
+register_shutdown_function(function() {
+    $error = error_get_last();
+    if ($error && ($error['type'] === E_ERROR || $error['type'] === E_PARSE)) {
+        if (!headers_sent()) { header('Content-Type: application/json'); }
+        echo json_encode(['success' => false, 'message' => 'Fatal Error: ' . $error['message'] . ' on line ' . $error['line']]);
+        exit;
+    }
+});
 header('Content-Type: application/json');
+
+// 啟用錯誤報告用於調試 (正式上線建議關閉 display_errors)
+error_reporting(E_ALL);
 ini_set('display_errors', 0); 
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -28,166 +40,211 @@ if (!$module || !$itemId) {
     exit;
 }
 
-// 快速載入模組配置（使用靜態緩存）
-static $configCache = [];
-if (!isset($configCache[$module])) {
-    $configFile = __DIR__ . "/set/{$module}Set.php";
-    if (!file_exists($configFile)) {
-        echo json_encode(['success' => false, 'message' => 'Config not found']);
-        exit;
-    }
-    $moduleConfig = require $configFile;
-    if (!is_array($moduleConfig) && isset($settingPage)) {
-        $moduleConfig = $settingPage;
-    }
-    $configCache[$module] = $moduleConfig;
-} else {
-    $moduleConfig = $configCache[$module];
+// 載入模組配置
+$configFile = __DIR__ . "/set/{$module}Set.php";
+if (!file_exists($configFile)) {
+    echo json_encode(['success' => false, 'message' => "Module config not found: {$module}Set.php"]);
+    exit;
 }
 
-// 快速提取配置
+// 載入設定檔，有些設定檔回傳 array，有些是用變數 $settingPage
+$moduleConfig = require $configFile;
+if (!is_array($moduleConfig) && isset($settingPage)) {
+    $moduleConfig = $settingPage;
+}
+
+if (!is_array($moduleConfig)) {
+    echo json_encode(['success' => false, 'message' => 'Invalid config format']);
+    exit;
+}
+
+// ---------------------------------------------------------------------
+// 【關鍵修改】動態欄位對應
+// ---------------------------------------------------------------------
 $tableName = $moduleConfig['tableName'];
-$primaryKey = $moduleConfig['primaryKey'];
-$cols = $moduleConfig['cols'] ?? [];
-$col_sort = array_key_exists('sort', $cols) ? $cols['sort'] : 'd_sort';
-$col_top = array_key_exists('top', $cols) ? $cols['top'] : 'd_top';
-$menuKey = $moduleConfig['menuKey'] ?? null;
+$menuKey   = $moduleConfig['menuKey'] ?? null;
 $menuValue = $moduleConfig['menuValue'] ?? null;
+
+// 取得主鍵名稱 (例如 d_id 或 t_id)
+$col_id    = $moduleConfig['primaryKey'];
+
+// 取得自定義欄位設定
+$cols      = $moduleConfig['cols'] ?? [];
+
+// 定義排序與置頂欄位 (如果沒設定，預設為 d_ 開頭，但確保 null 被保留)
+$col_sort  = array_key_exists('sort', $cols) ? $cols['sort'] : 'd_sort';
+$col_top   = array_key_exists('top', $cols) ? $cols['top'] : 'd_top';
+
+// 取得分類欄位 (如果有)
 $categoryField = $moduleConfig['listPage']['categoryField'] ?? null;
-$parentIdField = $cols['parent_id'] ?? null;
 
-// 載入 Map Helper
-require_once __DIR__ . '/includes/taxonomyMapHelper.php';
+// 【新增】檢查是否使用 Map Table 排序
+$useTaxonomyMapSort = $moduleConfig['listPage']['useTaxonomyMapSort'] ?? false;
+// ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// 【直接處理】排序邏輯
+// ---------------------------------------------------------------------
 try {
+    require_once 'includes/taxonomyMapHelper.php';
+    require_once 'includes/SortReorganizer.php';
+    require_once 'includes/UnifiedSortManager.php';
+
     $conn->beginTransaction();
 
-    // 1. 取得當前項目資料
-    $stmt = $conn->prepare("SELECT * FROM {$tableName} WHERE {$primaryKey} = ?");
-    $stmt->execute([$itemId]);
+    // 取得當前項目資訊
+    $stmt = $conn->prepare("SELECT * FROM {$tableName} WHERE {$col_id} = :id");
+    $stmt->execute([':id' => $itemId]);
     $item = $stmt->fetch(PDO::FETCH_ASSOC);
-    if (!$item) throw new Exception('找不到資料');
 
-    // 2. 判斷是否使用 Map Table 排序 (預設改為 false,除非配置明確啟用)
-    $useMapTableSort = false;
-    $configUseTaxonomyMapSort = $moduleConfig['listPage']['useTaxonomyMapSort'] ?? false;
-    if ($categoryId > 0 && hasTaxonomyMapTable($conn) && $configUseTaxonomyMapSort) {
-        $useMapTableSort = true;
+    if (!$item) {
+        throw new Exception('找不到資料');
     }
 
-    // 3. 檢查置頂項目是否可排序
-    $isPinned = false;
+    $useMapTableSort = ($categoryId > 0 && hasTaxonomyMapTable($conn) && $useTaxonomyMapSort);
+
+    // 插入式排序：將項目插入到目標位置，其他項目順移
     if ($useMapTableSort) {
-        $checkMapTop = $conn->prepare("SELECT d_top FROM data_taxonomy_map WHERE d_id = ? AND t_id = ?");
-        $checkMapTop->execute([$itemId, $categoryId]);
-        $mapRow = $checkMapTop->fetch(PDO::FETCH_ASSOC);
-        if ($mapRow && ($mapRow['d_top'] ?? 0) == 1) $isPinned = true;
-    } else {
-        $isGlobalSort = ($categoryId == 0);
-        if ($isGlobalSort && $col_top && ($item[$col_top] ?? 0) == 1) $isPinned = true;
-    }
+        // 在分類視圖下排序
+        $stmtOld = $conn->prepare("SELECT sort_num FROM data_taxonomy_map WHERE d_id = :id AND t_id = :tid");
+        $stmtOld->execute([':id' => $itemId, ':tid' => $categoryId]);
+        $oldSort = $stmtOld->fetchColumn();
 
-    if ($isPinned) throw new Exception('置頂項目無法調整排序');
-
-    // 4. 執行排序邏輯
-    if ($useMapTableSort) {
-        $mapStmt = $conn->prepare("SELECT sort_num FROM data_taxonomy_map WHERE d_id = ? AND t_id = ?");
-        $mapStmt->execute([$itemId, $categoryId]);
-        $mapRow = $mapStmt->fetch(PDO::FETCH_ASSOC);
-        if (!$mapRow) throw new Exception('找不到分類關聯');
-
-        $oldSort = (int)$mapRow['sort_num'];
-        if ($oldSort === $newSort) {
-            $conn->commit();
-            echo json_encode(['success' => true, 'message' => '无需更新']);
-            exit;
-        }
-
-        if ($newSort < $oldSort) {
-            $shiftSql = "UPDATE data_taxonomy_map SET sort_num = sort_num + 1 
-                        WHERE t_id = ? AND sort_num >= ? AND sort_num < ? AND (d_top = 0 OR d_top IS NULL)";
-            $shiftParams = [$categoryId, $newSort, $oldSort];
-        } else {
-            $shiftSql = "UPDATE data_taxonomy_map SET sort_num = sort_num - 1 
-                        WHERE t_id = ? AND sort_num > ? AND sort_num <= ? AND (d_top = 0 OR d_top IS NULL)";
-            $shiftParams = [$categoryId, $oldSort, $newSort];
-        }
-        $conn->prepare($shiftSql)->execute($shiftParams);
-
-        $conn->prepare("UPDATE data_taxonomy_map SET sort_num = ? WHERE d_id = ? AND t_id = ?")
-             ->execute([$newSort, $itemId, $categoryId]);
-
-    } else {
-        $oldSort = (int)$item[$col_sort];
-        if ($oldSort === $newSort) {
-            $conn->commit();
-            echo json_encode(['success' => true, 'message' => '无需更新']);
-            exit;
-        }
-
-        $where = ["1=1"];
-        $params = [];
-
-        // 【優化】更嚴謹的範圍鎖定，確保不影響其他分類或類型的排序
-        if ($menuKey) {
-            $actualMenuKey = ($menuKey === 'd_class1' && $tableName === 'taxonomies') ? 'taxonomy_type_id' : $menuKey;
-            if (isset($item[$actualMenuKey])) {
-                $where[] = "{$actualMenuKey} = ?";
-                $params[] = $item[$actualMenuKey];
+        if ($oldSort && $oldSort != $newSort) {
+            if ($oldSort < $newSort) {
+                // 向下移動
+                $conn->prepare("
+                    UPDATE data_taxonomy_map dtm
+                    INNER JOIN {$tableName} ds ON dtm.d_id = ds.{$col_id}
+                    SET dtm.sort_num = dtm.sort_num - 1
+                    WHERE dtm.t_id = :tid
+                    AND dtm.sort_num > :old_sort
+                    AND dtm.sort_num <= :new_sort
+                    AND dtm.d_id != :id
+                    AND (dtm.d_top = 0 OR dtm.d_top IS NULL)
+                ")->execute([
+                    ':tid' => $categoryId,
+                    ':old_sort' => $oldSort,
+                    ':new_sort' => $newSort,
+                    ':id' => $itemId
+                ]);
+            } else {
+                // 向上移動
+                $conn->prepare("
+                    UPDATE data_taxonomy_map dtm
+                    INNER JOIN {$tableName} ds ON dtm.d_id = ds.{$col_id}
+                    SET dtm.sort_num = dtm.sort_num + 1
+                    WHERE dtm.t_id = :tid
+                    AND dtm.sort_num >= :new_sort
+                    AND dtm.sort_num < :old_sort
+                    AND dtm.d_id != :id
+                    AND (dtm.d_top = 0 OR dtm.d_top IS NULL)
+                ")->execute([
+                    ':tid' => $categoryId,
+                    ':new_sort' => $newSort,
+                    ':old_sort' => $oldSort,
+                    ':id' => $itemId
+                ]);
             }
         }
 
-        if ($col_top) {
-            $where[] = "({$col_top} = 0 OR {$col_top} IS NULL)";
-        }
+        // 更新當前項目的排序值
+        $conn->prepare("UPDATE data_taxonomy_map SET sort_num = :new_sort WHERE d_id = :id AND t_id = :tid")
+             ->execute([':new_sort' => $newSort, ':id' => $itemId, ':tid' => $categoryId]);
+    } else {
+        // 在全部視圖下排序
+        $oldSort = $item[$col_sort] ?? null;
 
-        if ($categoryField && isset($item[$categoryField])) {
-            $where[] = "{$categoryField} = ?";
-            $params[] = $item[$categoryField];
-        }
+        if ($oldSort && $oldSort != $newSort) {
+            $baseConditions = ["1=1"];
+            $baseParams = [];
 
-        if ($parentIdField && isset($item[$parentIdField])) {
-            $where[] = "{$parentIdField} = ?";
-            $params[] = $item[$parentIdField];
-        }
+            if ($menuKey && $menuValue !== null) {
+                $baseConditions[] = "{$menuKey} = :menuValue";
+                $baseParams[':menuValue'] = $menuValue;
+            }
 
-        if (isset($item['lang'])) {
-            $where[] = "lang = ?";
-            $params[] = $item['lang'];
-        }
+            if (isset($item['lang'])) {
+                $baseConditions[] = "lang = :lang";
+                $baseParams[':lang'] = $item['lang'];
+            }
 
-        // 軟刪除過濾
-        $trashCol = $moduleConfig['cols']['delete_time'] ?? null;
-        if (!$trashCol) {
-            foreach (['d_delete_time', 'deleted_at', 'delete_time'] as $tc) {
-                if (array_key_exists($tc, $item)) { $trashCol = $tc; break; }
+            // 排除置頂項目
+            if ($col_top) {
+                try {
+                    $checkTopCol = $conn->prepare("SHOW COLUMNS FROM {$tableName} LIKE ?");
+                    $checkTopCol->execute([$col_top]);
+                    if ($checkTopCol->fetch()) {
+                        $baseConditions[] = "({$col_top} = 0 OR {$col_top} IS NULL)";
+                    }
+                } catch (Exception $e) {
+                    // 欄位不存在，忽略
+                }
+            }
+
+            // 排除軟刪除項目
+            $col_delete_time = $cols['delete_time'] ?? 'd_delete_time';
+            try {
+                $checkCol = $conn->prepare("SHOW COLUMNS FROM {$tableName} LIKE ?");
+                $checkCol->execute([$col_delete_time]);
+                if ($checkCol->fetch()) {
+                    $baseConditions[] = "({$col_delete_time} IS NULL OR {$col_delete_time} = '0000-00-00 00:00:00')";
+                }
+            } catch (Exception $e) {
+                // 欄位不存在，忽略
+            }
+
+            $whereBase = implode(' AND ', $baseConditions);
+
+            if ($oldSort < $newSort) {
+                // 向下移動
+                $params = array_merge($baseParams, [
+                    ':old_sort' => $oldSort,
+                    ':new_sort' => $newSort,
+                    ':id' => $itemId
+                ]);
+                $conn->prepare("
+                    UPDATE {$tableName}
+                    SET {$col_sort} = {$col_sort} - 1
+                    WHERE {$whereBase}
+                    AND {$col_sort} > :old_sort
+                    AND {$col_sort} <= :new_sort
+                    AND {$col_id} != :id
+                ")->execute($params);
+            } else {
+                // 向上移動
+                $params = array_merge($baseParams, [
+                    ':new_sort' => $newSort,
+                    ':old_sort' => $oldSort,
+                    ':id' => $itemId
+                ]);
+                $conn->prepare("
+                    UPDATE {$tableName}
+                    SET {$col_sort} = {$col_sort} + 1
+                    WHERE {$whereBase}
+                    AND {$col_sort} >= :new_sort
+                    AND {$col_sort} < :old_sort
+                    AND {$col_id} != :id
+                ")->execute($params);
             }
         }
-        if ($trashCol) {
-            $where[] = "{$trashCol} IS NULL";
-        }
 
-        $whereSql = implode(' AND ', $where);
-
-        if ($newSort < $oldSort) {
-            $shiftSql = "UPDATE {$tableName} SET {$col_sort} = {$col_sort} + 1 
-                        WHERE {$whereSql} AND {$col_sort} >= ? AND {$col_sort} < ?";
-            $shiftParams = array_merge($params, [$newSort, $oldSort]);
-        } else {
-            $shiftSql = "UPDATE {$tableName} SET {$col_sort} = {$col_sort} - 1 
-                        WHERE {$whereSql} AND {$col_sort} > ? AND {$col_sort} <= ?";
-            $shiftParams = array_merge($params, [$oldSort, $newSort]);
-        }
-        $conn->prepare($shiftSql)->execute($shiftParams);
-
-        $conn->prepare("UPDATE {$tableName} SET {$col_sort} = ? WHERE {$primaryKey} = ?")
-             ->execute([$newSort, $itemId]);
+        // 更新當前項目的排序值
+        $conn->prepare("UPDATE {$tableName} SET {$col_sort} = :new_sort WHERE {$col_id} = :id")
+             ->execute([':new_sort' => $newSort, ':id' => $itemId]);
     }
+
+    // 使用統一排序管理器進行全域與分類重排
+    \UnifiedSortManager::updateAfterDataChange($conn, $moduleConfig, $itemId, [
+        'lang' => $item['lang'] ?? null,
+        'categoryId' => $categoryId
+    ]);
 
     $conn->commit();
     echo json_encode(['success' => true, 'message' => '排序已更新']);
-
 } catch (Exception $e) {
-    if ($conn->inTransaction()) $conn->rollBack();
-    echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+    if ($conn->inTransaction()) {
+        $conn->rollBack();
+    }
+    echo json_encode(['success' => false, 'message' => '錯誤: ' . $e->getMessage()]);
 }

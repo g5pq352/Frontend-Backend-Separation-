@@ -11,6 +11,7 @@ require_once 'auth.php';
 // 載入 Element 模組
 require_once(__DIR__ . '/includes/elements/ModuleConfigElement.php');
 require_once(__DIR__ . '/includes/elements/PermissionElement.php');
+require_once(__DIR__ . '/includes/elements/SwalConfirmElement.php');
 
 // 載入其他輔助函數
 require_once(__DIR__ . '/includes/permissionCheck.php');
@@ -38,6 +39,10 @@ try {
 $menu_is = $moduleConfig['module'];
 $_SESSION['nowMenu'] = $menu_is;
 
+// 【首頁顯示管理】檢查是否為首頁顯示管理模組
+$isHomeDisplayModule = $moduleConfig['isHomeDisplayModule'] ?? false;
+$targetModule = $moduleConfig['targetModule'] ?? null;
+
 // 設定每頁顯示筆數與當前頁碼
 $maxRows = $moduleConfig['listPage']['itemsPerPage'] ?? 20;
 $pageNum = isset($_GET['pageNum']) ? (int) $_GET['pageNum'] : 0;
@@ -62,13 +67,14 @@ $col_active = array_key_exists('active', $customCols) ? $customCols['active'] : 
 $col_delete_time = array_key_exists('delete_time', $customCols) ? $customCols['delete_time'] : 'd_delete_time';
 $col_read = array_key_exists('read', $customCols) ? $customCols['read'] : 'd_read'; // 新增
 $col_reply = array_key_exists('reply', $customCols) ? $customCols['reply'] : 'd_reply'; // 新增回覆狀態
+$col_status = array_key_exists('status', $customCols) ? $customCols['status'] : 'm_status'; // 新增處理狀態
 $col_file_fk = $customCols['file_fk'] ?? 'file_d_id';
 // -----------------------------------------------------------------------
 
 // 【新增】語系處理
 $langField = 'lang';
 $activeLanguages = $conn->query("SELECT * FROM languages WHERE l_active = 1 ORDER BY l_sort ASC, l_id ASC")->fetchAll(PDO::FETCH_ASSOC);
-$defaultLang = 'tw'; // 預設值
+$defaultLang = DEFAULT_LANG_SLUG; // 預設值
 foreach ($activeLanguages as $al) {
     if ($al['l_is_default']) $defaultLang = $al['l_slug'];
 }
@@ -81,12 +87,79 @@ $_SESSION['editing_lang'] = $currentLang;
 $hasCategory = $moduleConfig['listPage']['hasCategory'] ?? false;
 $categoryName = $hasCategory ? $moduleConfig['listPage']['categoryName'] : null;
 $categoryField = $hasCategory ? $moduleConfig['listPage']['categoryField'] : null;
-$selectedCategory = $hasCategory && isset($_GET['selected1']) ? (int) $_GET['selected1'] : null;
+// 【重構】動態處理分類選取與階層自動補全
+$selectedCategory = null;
+if ($hasCategory) {
+    // 找出目前獲取的最高層級 selectedX
+    $maxSelectedIdx = 0;
+    for ($i = 10; $i >= 1; $i--) {
+        if (isset($_GET['selected' . $i]) && $_GET['selected' . $i] !== '' && $_GET['selected' . $i] !== 'all') {
+            $maxSelectedIdx = $i;
+            break;
+        }
+    }
+
+    if ($maxSelectedIdx > 0) {
+        $deepestVal = (int)$_GET['selected' . $maxSelectedIdx];
+        
+        // 如果只提供了一個參數，但它可能不是第一層，則自動補全
+        if ($maxSelectedIdx == 1 && is_array($categoryField) && count($categoryField) > 1) {
+            $path = [];
+            $currentId = $deepestVal;
+            while ($currentId > 0) {
+                $stmt = $conn->prepare("SELECT t_id, parent_id FROM taxonomies WHERE t_id = :id");
+                $stmt->execute([':id' => $currentId]);
+                $row = $stmt->fetch(PDO::FETCH_ASSOC);
+                if (!$row) break;
+                array_unshift($path, $row['t_id']);
+                $currentId = $row['parent_id'];
+            }
+            
+            if (count($path) > 1) {
+                // 需要重定向補全路徑
+                $redirectUrl = $_SERVER['REQUEST_URI'];
+                $newParams = [];
+                foreach ($path as $idx => $id) {
+                    $newParams[] = 'selected' . ($idx + 1) . '=' . $id;
+                }
+                $newQuery = implode('&', $newParams);
+                $redirectUrl = preg_replace('/selected1=\d+/', $newQuery, $redirectUrl);
+                header("Location: {$redirectUrl}");
+                exit;
+            }
+        }
+        $selectedCategory = $deepestVal;
+    }
+}
 
 // 如果有分類，載入分類選項
 $categories = [];
+$isLinkedCategory = false;
+$categoryFields = [];
+$selectedCategories = []; // 儲存所有層級的選擇
+
 if ($hasCategory && $categoryName) {
-    $categories = getCategoryOptions($categoryName, null, null, true);
+    // 檢查是否為連動分類 (linked categories)
+    if (is_array($categoryField)) {
+        $isLinkedCategory = true;
+        $categoryFields = $categoryField;
+        
+        // 【選項 B】載入第一層分類 (只要頂層，parent_id = 0)
+        $categories = getSubCategoryOptions($categoryName, 0);
+        
+        // 收集所有層級的選擇，並決定最後的 $selectedCategory
+        foreach ($categoryFields as $index => $field) {
+            $paramName = 'selected' . ($index + 1);
+            if (isset($_GET[$paramName]) && $_GET[$paramName] !== '' && $_GET[$paramName] !== 'all') {
+                $val = (int)$_GET[$paramName];
+                $selectedCategories[$index] = $val;
+                $selectedCategory = $val; // 越後面的層級覆蓋前面的
+            }
+        }
+    } else {
+        // 單一分類欄位
+        $categories = getCategoryOptions($categoryName, null, null, true);
+    }
 }
 
 // 建立查詢條件
@@ -158,30 +231,39 @@ $hasHierarchy = $moduleConfig['listPage']['hasHierarchy'] ?? false;
 $hasHierarchicalNav = $hasHierarchy && isset($moduleConfig['cols']['parent_id']);
 $parentIdField = $customCols['parent_id'] ?? null;
 
+// 【垃圾桶功能】檢查模組是否支援軟刪除
+$hasTrash = !empty($customCols['delete_time']);
+
 // 5. 構建查詢條件
 $conditions = [];
 $params = [];
+
+// 【首頁顯示管理】如果使用 customQuery，需要使用表別名
+$tableAlias = $tableName;
+if ($isHomeDisplayModule && !empty($moduleConfig['listPage']['customQuery'])) {
+    $tableAlias = 'ds'; // customQuery 中使用的別名
+}
 
 // 基本條件：模組過濾
 if ($menuKey && $menuValue !== null) {
     if ($menuKey === 'd_class1' && $tableName === 'taxonomies') {
         // 特殊處理：taxonomies 表實際上是用 taxonomy_type_id
-        $conditions[] = "{$tableName}.taxonomy_type_id = :menuValue";
+        $conditions[] = "{$tableAlias}.taxonomy_type_id = :menuValue";
     } else {
-        $conditions[] = "{$tableName}.{$menuKey} = :menuValue";
+        $conditions[] = "{$tableAlias}.{$menuKey} = :menuValue";
     }
     $params[':menuValue'] = $menuValue;
 }
 
-// 【階層導航】如果支援階層且有 parent_id 參數，添加過濾條件
-if ($hasHierarchicalNav && !$isTrashMode) {
+// 【階層導航】如果支援階層，添加過濾條件
+if ($hasHierarchicalNav) {
     $parentCol = $moduleConfig['cols']['parent_id'];
     if ($parentId > 0) {
-        $conditions[] = "{$tableName}.{$parentCol} = :parentId";
+        $conditions[] = "{$tableAlias}.{$parentCol} = :parentId";
         $params[':parentId'] = $parentId;
     } else {
         // 如果支援階層但沒有指定 parent_id (或指定為0)，顯示頂層 (0 或 NULL)
-        $conditions[] = "({$tableName}.{$parentCol} = 0 OR {$tableName}.{$parentCol} IS NULL)";
+        $conditions[] = "({$tableAlias}.{$parentCol} = 0 OR {$tableAlias}.{$parentCol} IS NULL)";
     }
 }
 
@@ -194,36 +276,106 @@ if ($tableName !== 'languages' && $languageEnabled !== false) {
     $langColStmt = $conn->prepare($checkLangColQuery);
     $langColStmt->execute();
     if ($langColStmt->rowCount() > 0) {
-        $conditions[] = "{$tableName}.{$langField} = :currentLang";
+        $conditions[] = "{$tableAlias}.{$langField} = :currentLang";
         $params[':currentLang'] = $currentLang;
     }
+}
+
+// 【新增】過濾已刪除分類下的資料（在「全部」模式下也生效）
+if ($hasCategory && $categoryField && !$isTrashMode) {
+    // 【修正】如果是連動分類（陣列），使用第一個欄位
+    $actualCategoryField = is_array($categoryField) ? $categoryField[0] : $categoryField;
+    
+    // 找出分類表 (從 cms_menus 找)
+    $catCheckStmt = $conn->prepare("SELECT menu_table, taxonomy_type_id FROM cms_menus WHERE menu_type = :type LIMIT 1");
+    $catCheckStmt->execute([':type' => $moduleConfig['listPage']['categoryName'] ?? '']);
+    $catMenuRow = $catCheckStmt->fetch();
+
+    // 【修正】判斷分類表：優先使用 menu_table，如果為空但有 taxonomy_type_id，則使用 taxonomies
+    $cTable = null;
+    if ($catMenuRow) {
+        if (!empty($catMenuRow['menu_table'])) {
+            $cTable = $catMenuRow['menu_table'];
+        } elseif (!empty($catMenuRow['taxonomy_type_id'])) {
+            $cTable = 'taxonomies';
+        }
+    }
+
+    if ($cTable) {
+        $cPK = ($cTable === 'taxonomies') ? 't_id' : 'd_id';
+
+        // 判斷分類表的軟刪除欄位類型
+        if ($cTable === 'taxonomies') {
+            $catDeleteCol = 'deleted_at';
+            // TIMESTAMP 類型只檢查 IS NULL
+            $catDeleteCondition = "{$catDeleteCol} IS NULL";
+        } else {
+            $catDeleteCol = 'd_delete_time';
+            // VARCHAR 類型可以檢查空字串
+            $catDeleteCondition = "({$catDeleteCol} IS NULL OR {$catDeleteCol} = '')";
+        }
+
+        // 【關鍵修正】加入條件：只顯示分類未被刪除的資料，或沒有分類的資料
+        // 使用子查詢來確保：1) 沒有分類 OR 2) 有分類且分類未被刪除
+        $conditions[] = "({$tableAlias}.{$actualCategoryField} IS NULL OR {$tableAlias}.{$actualCategoryField} = 0 OR EXISTS (
+            SELECT 1 FROM {$cTable}
+            WHERE {$cTable}.{$cPK} = {$tableAlias}.{$actualCategoryField}
+            AND {$catDeleteCondition}
+        ))";
+
+        // 【調試】記錄條件
+        error_log("Added category filter: hasCategory={$hasCategory}, actualCategoryField={$actualCategoryField}, cTable={$cTable}, condition added");
+    } else {
+        error_log("Category filter NOT added: menu_table and taxonomy_type_id both empty for categoryName=" . ($moduleConfig['listPage']['categoryName'] ?? 'NULL'));
+    }
+} else {
+    $actualCategoryField = is_array($categoryField) ? $categoryField[0] : $categoryField;
+    error_log("Category filter skipped: hasCategory={$hasCategory}, actualCategoryField={$actualCategoryField}, isTrashMode={$isTrashMode}");
 }
 
 // 分類過濾 (垃圾桶模式下通常顯示全部，除非有特別選定)
 if ($hasCategory && $selectedCategory && !$isTrashMode) {
     if ($categoryField) {
         // 【防呆】檢查該分類是否屬於當前語系，避免跨語系切換時顯示空白
+        // 【新增】同時檢查分類是否已被刪除
         $isValidCategory = true;
         if ($tableName !== 'languages') {
             // 找出分類表 (從 cms_menus 找)
             $catCheckStmt = $conn->prepare("SELECT menu_table FROM cms_menus WHERE menu_type = :type LIMIT 1");
             $catCheckStmt->execute([':type' => $moduleConfig['listPage']['categoryName'] ?? '']);
             $catMenuRow = $catCheckStmt->fetch();
-            
+
             if ($catMenuRow && !empty($catMenuRow['menu_table'])) {
                 $cTable = $catMenuRow['menu_table'];
                 $cPK = ($cTable === 'taxonomies') ? 't_id' : 'd_id';
-                
+
+                // 【新增】檢查分類表的軟刪除欄位
+                $catDeleteCol = null;
+                $catDeleteCondition = '';
+                if ($cTable === 'taxonomies') {
+                    $catDeleteCol = 'deleted_at';
+                    // TIMESTAMP 類型只檢查 IS NULL
+                    $catDeleteCondition = "AND {$catDeleteCol} IS NULL";
+                } else {
+                    $catDeleteCol = 'd_delete_time';
+                    // VARCHAR 類型可以檢查空字串
+                    $catDeleteCondition = "AND ({$catDeleteCol} IS NULL OR {$catDeleteCol} = '')";
+                }
+
                 // 檢查欄位是否存在 (防呆)
                 try {
                     $checkCCQuery = "SHOW COLUMNS FROM `{$cTable}` LIKE '{$langField}'";
                     $ccStmt = $conn->query($checkCCQuery);
                     if ($ccStmt && $ccStmt->rowCount() > 0) {
-                        $verifyQuery = "SELECT COUNT(*) FROM `{$cTable}` WHERE {$cPK} = :cid AND lang = :lang";
+                        // 【修改】同時檢查語系和刪除狀態
+                        $verifyQuery = "SELECT COUNT(*) FROM `{$cTable}`
+                                       WHERE {$cPK} = :cid
+                                       AND lang = :lang
+                                       {$catDeleteCondition}";
                         $vStmt = $conn->prepare($verifyQuery);
                         $vStmt->execute([':cid' => $selectedCategory, ':lang' => $currentLang]);
                         if ($vStmt->fetchColumn() == 0) {
-                            $isValidCategory = false; // 該語系下找不到此分類
+                            $isValidCategory = false; // 該語系下找不到此分類，或分類已被刪除
                         }
                     }
                 } catch (PDOException $e) {
@@ -238,29 +390,31 @@ if ($hasCategory && $selectedCategory && !$isTrashMode) {
             // 檢查是否有 data_taxonomy_map 表（新系統）
             $checkMapTable = "SHOW TABLES LIKE 'data_taxonomy_map'";
             $mapTableStmt = $conn->query($checkMapTable);
-            
+
             // 【新增】檢查設定檔是否啟用 useTaxonomyMapSort (預設為 true)
             $configUseTaxonomyMapSort = $moduleConfig['listPage']['useTaxonomyMapSort'] ?? true;
-            
+
             if ($mapTableStmt && $mapTableStmt->rowCount() > 0 && $configUseTaxonomyMapSort) {
                 // 使用 data_taxonomy_map 表（推薦）
                 $conditions[] = "EXISTS (
-                    SELECT 1 FROM data_taxonomy_map 
-                    WHERE data_taxonomy_map.d_id = {$tableName}.{$col_id} 
+                    SELECT 1 FROM data_taxonomy_map
+                    WHERE data_taxonomy_map.d_id = {$tableAlias}.{$col_id}
                     AND data_taxonomy_map.t_id = :categoryId
                 )";
                 $params[':categoryId'] = $selectedCategory;
             } else {
                 // 降級使用 d_tag 欄位（向後兼容）
                 // 修正：如果不是用 Map Table，那就是直接過濾欄位 (例如 d_class2)
-                $conditions[] = "{$tableName}.{$categoryField} = :categoryId";
+                // 【修正】如果是連動分類（陣列），使用第一個欄位
+                $actualCategoryField = is_array($categoryField) ? $categoryField[0] : $categoryField;
+                $conditions[] = "{$tableAlias}.{$actualCategoryField} = :categoryId";
                 // 原本的 FIND_IN_SET 也可以，但對於 d_class2 這種 INT 欄位，用 = 比較準確且快
-                // $conditions[] = "FIND_IN_SET(:categoryId, {$tableName}.{$categoryField})";
+                // $conditions[] = "FIND_IN_SET(:categoryId, {$tableAlias}.{$actualCategoryField})";
                 $params[':categoryId'] = $selectedCategory;
             }
         } else {
             // 如果不合法，清空變數以便 UI 顯示「全部」
-            $selectedCategory = ""; 
+            $selectedCategory = "";
         }
     }
 }
@@ -268,9 +422,9 @@ if ($hasCategory && $selectedCategory && !$isTrashMode) {
 // 回收桶模式
 if ($columnExists) { // Only apply trash filter if the column exists
     if ($isTrashMode) {
-        $conditions[] = "{$tableName}.{$col_delete_time} IS NOT NULL";
+        $conditions[] = "{$tableAlias}.{$col_delete_time} IS NOT NULL";
     } else {
-        $conditions[] = "{$tableName}.{$col_delete_time} IS NULL";
+        $conditions[] = "{$tableAlias}.{$col_delete_time} IS NULL";
     }
 }
 
@@ -282,9 +436,28 @@ $whereClause = !empty($conditions) ? 'WHERE ' . implode(' AND ', $conditions) : 
 error_log("Module: {$module}, Table: {$tableName}, WHERE: {$whereClause}, Params: " . json_encode($params));
 
 // 6. 查詢總筆數
-$countQuery = "SELECT COUNT(*) as total FROM {$tableName} {$whereClause}";
+// 【首頁顯示管理】如果使用 customQuery，需要特殊處理
+$customQuery = $moduleConfig['listPage']['customQuery'] ?? null;
+if ($customQuery) {
+    // 使用 customQuery 的子查詢來計算總數
+    $countQuery = "SELECT COUNT(*) as total FROM ({$customQuery} {$whereClause}) as count_table";
+} else {
+    $countQuery = "SELECT COUNT(*) as total FROM {$tableName} {$whereClause}";
+}
+
 $countStmt = $conn->prepare($countQuery);
-$countStmt->execute($params);
+
+// 【首頁顯示管理】如果使用 customQuery，需要綁定額外參數
+if ($isHomeDisplayModule && $targetModule) {
+    $countStmt->bindValue(':targetModule', $targetModule);
+    $countStmt->bindValue(':currentLang', $currentLang);
+}
+
+foreach ($params as $key => $value) {
+    $countStmt->bindValue($key, $value);
+}
+
+$countStmt->execute();
 $totalRows = $countStmt->fetch()['total'];
 
 error_log("Total rows found: {$totalRows}");
@@ -302,10 +475,13 @@ while ($colInfo = $columnsStmt->fetch(PDO::FETCH_ASSOC)) {
 // 【防呆】只在欄位存在時才使用
 $safeOrderBy = $orderBy;
 // 檢查 ORDER BY 中的欄位是否存在
-preg_match('/^(\w+)/', $orderBy, $matches);
-if (isset($matches[1]) && !in_array($matches[1], $tableColumns)) {
-    // 如果排序欄位不存在，使用主鍵
-    $safeOrderBy = "{$col_id} DESC";
+// 【首頁顯示管理】跳過檢查，因為 orderBy 中包含計算欄位（is_in_home）
+if (!$isHomeDisplayModule) {
+    preg_match('/^(\w+)/', $orderBy, $matches);
+    if (isset($matches[1]) && !in_array($matches[1], $tableColumns)) {
+        // 如果排序欄位不存在，使用主鍵
+        $safeOrderBy = "{$col_id} DESC";
+    }
 }
 
 // 【修正】如果有 d_top 欄位，從 orderBy 中移除它，因為我們會在 sortSql 中統一加入
@@ -313,10 +489,10 @@ if ($col_top !== null && in_array($col_top, $tableColumns)) {
     // 從 safeOrderBy 中移除 d_top 的排序（避免重複）
     $safeOrderBy = preg_replace('/\b' . preg_quote($col_top, '/') . '\s+(DESC|ASC)\s*,?\s*/i', '', $safeOrderBy);
     $safeOrderBy = trim($safeOrderBy, ', ');
-    
+
     // 【修改】恢復無條件置頂排序。只要有 d_top 欄位，就應該排在最前面。
     // 無論是否在分類下，置頂項目都應該優先顯示（全域置頂）。
-    $sortSql = "{$tableName}.{$col_top} DESC, ";
+    $sortSql = "{$tableAlias}.{$col_top} DESC, ";
 } else {
     $sortSql = "";
 }
@@ -324,14 +500,17 @@ if ($col_top !== null && in_array($col_top, $tableColumns)) {
 // 【新增】為了避免 JOIN 查詢導致欄位衝突 (Ambiguous column)，對 safeOrderBy 也加上 Table Name 前綴
 // 【新增】為了避免 JOIN 查詢導致欄位衝突 (Ambiguous column)，對 safeOrderBy 也加上 Table Name 前綴
 if (!empty($safeOrderBy)) {
-    $safeOrderByParts = explode(',', $safeOrderBy);
-    foreach ($safeOrderByParts as &$part) {
-        $part = trim($part);
-        if (!empty($part) && !strpos($part, '.')) { // 如果還沒有點號 (表示未指定 Table)
-            $part = "{$tableName}.{$part}";
+    // 【首頁顯示管理】不要自動加前綴，因為 orderBy 中已經包含了正確的表別名
+    if (!$isHomeDisplayModule) {
+        $safeOrderByParts = explode(',', $safeOrderBy);
+        foreach ($safeOrderByParts as &$part) {
+            $part = trim($part);
+            if (!empty($part) && !strpos($part, '.')) { // 如果還沒有點號 (表示未指定 Table)
+                $part = "{$tableAlias}.{$part}";
+            }
         }
+        $safeOrderBy = implode(', ', $safeOrderByParts);
     }
-    $safeOrderBy = implode(', ', $safeOrderByParts);
 }
 
 // 【新增】支援 customQuery（用於 JOIN 查詢）
@@ -342,7 +521,7 @@ $useMapTableSort = false;
 // 【新增】檢查設定檔是否啟用 useTaxonomyMapSort (預設為 true)
 $configUseTaxonomyMapSort = $moduleConfig['listPage']['useTaxonomyMapSort'] ?? true;
 
-if ($hasCategory && $selectedCategory && !$isTrashMode && $configUseTaxonomyMapSort) {
+if ($hasCategory && $selectedCategory > 0 && !$isTrashMode && $configUseTaxonomyMapSort) {
     $checkMapTable = "SHOW TABLES LIKE 'data_taxonomy_map'";
     $mapTableStmt = $conn->query($checkMapTable);
     if ($mapTableStmt && $mapTableStmt->rowCount() > 0) {
@@ -355,17 +534,34 @@ if ($useMapTableSort) {
     // 【關鍵】將 sort_num 別名為 d_sort，讓後續程式碼統一使用
     // 【修正】使用 data_taxonomy_map 的 d_top (如果有) 作為置頂依據
     // SELECT 中覆蓋 d_top，這樣列表顯示的置頂狀態就是該分類下的狀態
-    $dataQuery = "SELECT {$tableName}.*, data_taxonomy_map.sort_num AS {$col_sort}, data_taxonomy_map.d_top AS {$col_top}
-                  FROM {$tableName}
-                  INNER JOIN data_taxonomy_map ON {$tableName}.{$col_id} = data_taxonomy_map.d_id
-                  {$whereClause} 
-                  AND data_taxonomy_map.t_id = :map_category_id
-                  ORDER BY data_taxonomy_map.{$col_top} DESC, data_taxonomy_map.sort_num ASC
-                  LIMIT :offset, :limit";
-    $params[':map_category_id'] = $selectedCategory;
+        // 【修改】JOIN 增加 COALESCE 預防剛過渡時 mapping 尚未建立的情況
+        $dataQuery = "SELECT {$tableName}.*, 
+                             COALESCE(data_taxonomy_map.sort_num, {$tableName}.{$col_sort}) AS {$col_sort}, 
+                             COALESCE(data_taxonomy_map.d_top, {$tableName}.{$col_top}) AS {$col_top}
+                      FROM {$tableName}
+                      LEFT JOIN data_taxonomy_map ON {$tableName}.{$col_id} = data_taxonomy_map.d_id 
+                                                 AND data_taxonomy_map.t_id = :map_category_id
+                      {$whereClause} 
+                      ORDER BY COALESCE(data_taxonomy_map.{$col_top}, 0) DESC, 
+                               COALESCE(data_taxonomy_map.sort_num, 99999) ASC
+                      LIMIT :offset, :limit";
+        $params[':map_category_id'] = !empty($selectedCategory) ? $selectedCategory : 0;
 } elseif ($customQuery) {
     // 使用自訂查詢（已包含 SELECT 和 FROM）
+    // 【首頁顯示管理】如果是首頁顯示模組，加入 targetModule 和 currentLang 參數
+    if ($isHomeDisplayModule && $targetModule) {
+        $params[':targetModule'] = $targetModule;
+        $params[':currentLang'] = $currentLang;
+    }
     $dataQuery = "{$customQuery} {$whereClause} ORDER BY {$sortSql}{$safeOrderBy} LIMIT :offset, :limit";
+
+    // 【調試】輸出 SQL 查詢
+    if ($isHomeDisplayModule) {
+        echo "<!-- DEBUG SQL: {$dataQuery} -->";
+        echo "<!-- DEBUG sortSql: '{$sortSql}' -->";
+        echo "<!-- DEBUG safeOrderBy: '{$safeOrderBy}' -->";
+        echo "<!-- DEBUG orderBy from config: '{$orderBy}' -->";
+    }
 } else {
     // 使用預設查詢
     $dataQuery = "SELECT * FROM {$tableName} {$whereClause} ORDER BY {$sortSql}{$safeOrderBy} LIMIT :offset, :limit";
@@ -477,7 +673,22 @@ require_once('display_page.php');
                                     } else {
                                         echo "<span class='me-3'>當前位置：頂層選單</span>";
                                     }
-                                }
+                                } 
+                                // elseif ($hasCategory && !empty($selectedCategories) && !$isTrashMode) {
+                                //     // 【新增】連動分類麵包屑
+                                //     $breadcrumbParts = [];
+                                //     foreach ($selectedCategories as $index => $catId) {
+                                //         $stmt = $conn->prepare("SELECT t_id, t_name FROM taxonomies WHERE t_id = :id");
+                                //         $stmt->execute([':id' => $catId]);
+                                //         $tRow = $stmt->fetch(PDO::FETCH_ASSOC);
+                                //         if ($tRow) {
+                                //             $breadcrumbParts[] = $tRow['t_name'];
+                                //         }
+                                //     }
+                                //     if (!empty($breadcrumbParts)) {
+                                //         echo "<span class='me-3' style='font-size: 1.1rem; color: #555;'>當前分類：<strong>" . implode(' <i class="fas fa-angle-right mx-1"></i> ', array_map('htmlspecialchars', $breadcrumbParts)) . "</strong></span>";
+                                //     }
+                                // }
                                 ?>
 
                                 <?php if ($isTrashMode): ?>
@@ -494,10 +705,19 @@ require_once('display_page.php');
                                         if ($hasHierarchicalNav && isset($_GET['parent_id'])) {
                                             $urlParams[] = "parent_id=" . urlencode($_GET['parent_id']);
                                         }
-                                        if ($hasCategory && isset($_GET['selected1'])) {
-                                            $urlParams[] = "selected1=" . urlencode($_GET['selected1']);
+                                        
+                                        // 【修改】收集所有層級的選擇參數 (selected1, selected2, ...)
+                                        foreach ($_GET as $key => $value) {
+                                            if (strpos($key, 'selected') === 0 && $value !== '' && $value !== 'all') {
+                                                $urlParams[] = $key . "=" . urlencode($value);
+                                            }
                                         }
                                         
+                                        // 確保 trash 狀態也傳遞
+                                        if ($isTrashMode) {
+                                            $urlParams[] = "trash=1";
+                                        }
+
                                         // 【多語系】加入語系參數
                                         $urlParams[] = "language=" . urlencode($currentLang);
 
@@ -519,9 +739,16 @@ require_once('display_page.php');
                                     <ul class="nav nav-pills nav-pills-primary">
                                         <?php 
                                         $urlParams = $_GET;
-                                        unset($urlParams['language'], $urlParams['pageNum'], $urlParams['totalRows'], $urlParams['module'], $urlParams['trash'], $urlParams['selected1']);
+                                        unset($urlParams['language'], $urlParams['pageNum'], $urlParams['totalRows'], $urlParams['module'], $urlParams['trash'], $urlParams['selected1'], $urlParams['selected2']);
                                         if (isset($categoryField)) {
-                                            unset($urlParams[$categoryField]);
+                                            // 【修正】如果是連動分類（陣列），移除所有相關欄位
+                                            if (is_array($categoryField)) {
+                                                foreach ($categoryField as $field) {
+                                                    unset($urlParams[$field]);
+                                                }
+                                            } else {
+                                                unset($urlParams[$categoryField]);
+                                            }
                                         }
                                         $baseQuery = http_build_query($urlParams);
                                         
@@ -542,21 +769,67 @@ require_once('display_page.php');
                             <div class="card-body">
                                 <div class="datatables-header-footer-wrapper mt-2">
                                     <div class="datatable-header">
+                                        <!-- 擴充: excel匯入 / excel匯出 -->
+                                        <!-- <div class="row align-items-center mb-3">
+                                            <div class="col-12 col-lg-auto ms-auto ml-auto mb-3 mb-lg-0">
+                                                <div class="d-flex align-items-lg-center flex-column flex-lg-row">
+                                                    <div class="me-2">1</div>
+                                                    <div class="me-2">2</div>
+                                                    <div class="me-2">3</div>
+                                                </div>
+                                            </div>
+                                        </div> -->
+                                        <!-- 篩選 / Show幾篇 / 搜尋 -->
                                         <div class="row align-items-center mb-3">
                                             <div class="col-8 col-lg-auto ms-auto ml-auto mb-3 mb-lg-0">
                                                 <div class="d-flex align-items-lg-center flex-column flex-lg-row">
                                                     <?php if (!$isTrashMode && ($moduleConfig['listPage']['hasCategory'] ?? false)): ?>
                                                         <label class="ws-nowrap me-3 mb-0">Filter By:</label>
-                                                        <select name="select1" id="select1" class="chosen-select form-control select-style-1 filter-by">
-                                                            <?php foreach ($categories as $cat): ?>
-                                                                <?php $selected = ($cat['id'] == $selectedCategory) ? "selected" : ""; ?>
-                                                                <option value="<?php echo $cat['id']; ?>" <?php echo $selected; ?>>
-                                                                    <?php echo $cat['name']; ?>
-                                                                </option>
+                                                        
+                                                        <?php if ($isLinkedCategory): ?>
+                                                            <?php foreach ($categoryField as $index => $field): 
+                                                                $level = $index + 1;
+                                                                $paramName = 'selected' . $level;
+                                                                $currentVal = $selectedCategories[$index] ?? null;
+                                                                $prevVal = ($level > 1) ? ($selectedCategories[$index-1] ?? null) : 0;
+                                                                
+                                                                // 決定是否顯示：第一層或是前一層有值
+                                                                $show = ($level == 1 || !empty($prevVal));
+                                                            ?>
+                                                                <select name="select<?= $level ?>" id="select<?= $level ?>" 
+                                                                    class="form-control select-style-1 me-2 category-filter" 
+                                                                    data-category="<?= $categoryName ?>" 
+                                                                    data-level="<?= $level ?>" 
+                                                                    style="width: auto;<?= $show ? '' : 'display:none;' ?>">
+                                                                    <?php if ($level == 1): ?>
+                                                                        <option value="all">全部</option>
+                                                                        <?php foreach ($categories as $cat): ?>
+                                                                            <option value="<?= $cat['id'] ?>" <?= ($currentVal == $cat['id']) ? 'selected' : '' ?>><?= $cat['name'] ?></option>
+                                                                        <?php endforeach; ?>
+                                                                    <?php else: ?>
+                                                                        <option value="">請選擇...</option>
+                                                                        <?php if (!empty($prevVal)): 
+                                                                            $childCategories = getSubCategoryOptions($categoryName, $prevVal);
+                                                                            foreach ($childCategories as $child): ?>
+                                                                                <option value="<?= $child['id'] ?>" <?= ($currentVal == $child['id']) ? 'selected' : '' ?>><?= $child['name'] ?></option>
+                                                                            <?php endforeach;
+                                                                        endif; ?>
+                                                                    <?php endif; ?>
+                                                                </select>
                                                             <?php endforeach; ?>
-                                                        </select>
+                                                        <?php else: ?>
+                                                            <!-- 單一分類 -->
+                                                            <select name="select1" id="select1" class="form-control select-style-1 filter-by">
+                                                                <?php foreach ($categories as $cat): ?>
+                                                                    <?php $selected = ($cat['id'] == $selectedCategory) ? "selected" : ""; ?>
+                                                                    <option value="<?php echo $cat['id']; ?>" <?php echo $selected; ?>>
+                                                                        <?php echo $cat['name']; ?>
+                                                                    </option>
+                                                                <?php endforeach; ?>
+                                                            </select>
+                                                        <?php endif; ?>
                                                     <?php else: ?>
-                                                        <select name="select1" id="select1" class="chosen-select form-control select-style-1 filter-by" style="display: none;">
+                                                        <select name="select1" id="select1" class="form-control select-style-1 filter-by" style="display: none;">
                                                             <option value="all">all</option>
                                                         </select>
                                                     <?php endif; ?>
@@ -588,7 +861,13 @@ require_once('display_page.php');
                                     <table class="table table-ecommerce-simple table-striped mb-0" id="datatable-ecommerce-list" style="min-width: 550px;">
                                         <thead>
                                             <tr>
+                                                <?php
+                                                // 檢查是否顯示選擇框
+                                                $showCheckbox = $moduleConfig['listPage']['showCheckbox'] ?? true;
+                                                if ($showCheckbox):
+                                                ?>
                                                 <th width="3%"><input type="checkbox" name="select-all" class="select-all checkbox-style-1 p-relative top-2" value="" /></th>
+                                                <?php endif; ?>
                                                 <?php
                                                 if ($isTrashMode) {
                                                     // 1. 先判斷原本的配置中有沒有圖片欄位
@@ -621,9 +900,10 @@ require_once('display_page.php');
                                                     $displayColumns = $moduleConfig['listPage']['columns'];
 
                                                     // 【修改】如果選擇「全部」分類，隱藏置頂和排序欄位
+                                                    // 【修改】不再隱藏排序欄位，由 useTaxonomyMapSort 控制邏輯
+                                                    /*
                                                     if ($hasCategory && empty($selectedCategory)) {
                                                         $displayColumns = array_filter($displayColumns, function ($col) {
-                                                            // 過濾掉 pin 按鈕和 sort 下拉選單
                                                             if ($col['type'] === 'sort')
                                                                 return false;
                                                             if ($col['type'] === 'button' && $col['field'] === 'pin')
@@ -631,6 +911,7 @@ require_once('display_page.php');
                                                             return true;
                                                         });
                                                     }
+                                                    */
                                                 }
 
                                                 foreach ($displayColumns as $col):
@@ -648,7 +929,9 @@ require_once('display_page.php');
                                                 
                                             ?>
                                                 <tr>
+                                                <?php if ($showCheckbox): ?>
                                                 <td width="30"><input type="checkbox" name="checkboxRow1" class="row-checkbox checkbox-style-1 p-relative top-2" value="<?php echo $rowId; ?>" /></td>
+                                                <?php endif; ?>
                                                     <?php foreach ($displayColumns as $col): ?>
                                                         <td align="center">
                                                             <?php
@@ -671,9 +954,21 @@ require_once('display_page.php');
                                                                         echo "<img src=\"image/default_image_s.jpg\">";
                                                                     }
                                                                 } elseif ($col['field'] == 'view') {
-                                                                    echo renderViewButton($rowId, $module, $primaryKey, true);
+                                                                    $extraParams = [];
+                                                                    foreach ($_GET as $key => $value) {
+                                                                        if (strpos($key, 'selected') === 0 || $key === 'parent_id' || $key === 'language') {
+                                                                            if ($value !== '' && $value !== 'all') $extraParams[$key] = $value;
+                                                                        }
+                                                                    }
+                                                                    echo renderViewButton($rowId, $module, $primaryKey, true, $extraParams);
                                                                 } elseif ($col['field'] == 'edit') {
-                                                                    echo renderEditButton($rowId, $module, $primaryKey, true);
+                                                                    $extraParams = [];
+                                                                    foreach ($_GET as $key => $value) {
+                                                                        if (strpos($key, 'selected') === 0 || $key === 'parent_id' || $key === 'language') {
+                                                                            if ($value !== '' && $value !== 'all') $extraParams[$key] = $value;
+                                                                        }
+                                                                    }
+                                                                    echo renderEditButton($rowId, $module, $primaryKey, true, $extraParams);
                                                                 } elseif ($col['field'] == 'restore') {
                                                                     echo renderRestoreButton($rowId, $module);
                                                                 } elseif ($col['field'] == 'delete') {
@@ -684,7 +979,23 @@ require_once('display_page.php');
                                                                 switch ($col['type']) {
                                                                     case 'date':
                                                                     case 'text':
-                                                                        echo "<a href=\"".PORTAL_AUTH_URL."tpl={$module}/detail?{$primaryKey}={$rowId}\">" . htmlspecialchars($row[$col['field']] ?? '', ENT_QUOTES, 'UTF-8') . "</a>";
+                                                                        // 【首頁顯示管理】不顯示連結
+                                                                        if ($isHomeDisplayModule) {
+                                                                            echo htmlspecialchars($row[$col['field']] ?? '', ENT_QUOTES, 'UTF-8');
+                                                                        } else {
+                                                                            // 【修改】加入多層次分類參數到詳情頁連結
+                                                                            $detailParams = ["{$primaryKey}={$rowId}"];
+                                                                            foreach ($_GET as $key => $value) {
+                                                                                if (strpos($key, 'selected') === 0 && $value !== '' && $value !== 'all') {
+                                                                                    $detailParams[] = $key . "=" . urlencode($value);
+                                                                                }
+                                                                            }
+                                                                            if (isset($_GET['parent_id'])) $detailParams[] = "parent_id=" . urlencode($_GET['parent_id']);
+                                                                            if (isset($_GET['language'])) $detailParams[] = "language=" . urlencode($_GET['language']);
+                                                                            
+                                                                            $detailUrl = PORTAL_AUTH_URL . "tpl={$module}/detail?" . implode('&', $detailParams);
+                                                                            echo "<a href=\"{$detailUrl}\">" . htmlspecialchars($row[$col['field']] ?? '', ENT_QUOTES, 'UTF-8') . "</a>";
+                                                                        }
                                                                         break;
                                                                     case 'view_count':
                                                                         echo $row['d_view'] ?? 0;
@@ -703,11 +1014,12 @@ require_once('display_page.php');
                                                                         'row' => $row,
                                                                         'menuKey' => $menuKey,
                                                                         'menuValue' => $menuValue,
-                                                                        'col_top' => $cols['top'] ?? null,
+                                                                        'col_top' => $customCols['top'] ?? null,
                                                                         'hasCategory' => $hasCategory,
                                                                         'selectedCategory' => $selectedCategory,
                                                                         'categoryField' => $categoryField,
-                                                                        'useTaxonomyMapSort' => $moduleConfig['listPage']['useTaxonomyMapSort'] ?? true,
+                                                                        // 【修改】如果設定為使用 Map Table 排序，不論是否選擇分類都啟用 (All 模式下 t_id = 0)
+                                                                        'useTaxonomyMapSort' => ($hasCategory && ($moduleConfig['listPage']['useTaxonomyMapSort'] ?? true) && $hasMapTable),
                                                                         'hasHierarchicalNav' => $hasHierarchicalNav,
                                                                         'parentIdField' => $parentIdField,
                                                                         'currentParentId' => $parentId,
@@ -735,32 +1047,157 @@ require_once('display_page.php');
                                                                     $imgStmt->execute([':file_type' => $imageFileType, ':id' => $rowId]);
                                                                     $imgRow = $imgStmt->fetch();
                                                                     if ($imgRow) {
-                                                                        echo "<a href=\"".PORTAL_AUTH_URL."tpl={$module}/detail?{$primaryKey}={$rowId}\"><img src=\"../{$imgRow['file_link2']}\"></a>";
+                                                                        $detailParams = ["{$primaryKey}={$rowId}"];
+                                                                        foreach ($_GET as $key => $value) {
+                                                                            if (strpos($key, 'selected') === 0 && $value !== '' && $value !== 'all') {
+                                                                                $detailParams[] = $key . "=" . urlencode($value);
+                                                                            }
+                                                                        }
+                                                                        if (isset($_GET['parent_id'])) $detailParams[] = "parent_id=" . urlencode($_GET['parent_id']);
+                                                                        if (isset($_GET['language'])) $detailParams[] = "language=" . urlencode($_GET['language']);
+                                                                        $detailUrl = PORTAL_AUTH_URL . "tpl={$module}/detail?" . implode('&', $detailParams);
+                                                                        
+                                                                        echo "<a href=\"{$detailUrl}\"><img src=\"../{$imgRow['file_link2']}\"></a>";
                                                                     } else {
-                                                                        echo "<a href=\"".PORTAL_AUTH_URL."tpl={$module}/detail?{$primaryKey}={$rowId}\"><img src=\"image/default_image_s.jpg\"></a>";
+                                                                        $detailParams = ["{$primaryKey}={$rowId}"];
+                                                                        foreach ($_GET as $key => $value) {
+                                                                            if (strpos($key, 'selected') === 0 && $value !== '' && $value !== 'all') {
+                                                                                $detailParams[] = $key . "=" . urlencode($value);
+                                                                            }
+                                                                        }
+                                                                        if (isset($_GET['parent_id'])) $detailParams[] = "parent_id=" . urlencode($_GET['parent_id']);
+                                                                        if (isset($_GET['language'])) $detailParams[] = "language=" . urlencode($_GET['language']);
+                                                                        $detailUrl = PORTAL_AUTH_URL . "tpl={$module}/detail?" . implode('&', $detailParams);
+
+                                                                        echo "<a href=\"{$detailUrl}\"><img src=\"image/default_image_s.jpg\"></a>";
                                                                     }
                                                                     break;
-                                                                case 'select':
-                                                                    // 【新增】處理 select 欄位顯示
-                                                                    $fieldValue = $row[$col['field']] ?? '';
-                                                                    $displayLabel = $fieldValue; // 預設顯示原始值
+                                                                 case 'select':
+                                                                    // 【重構】支援多選欄位顯示標籤
+                                                                    $fieldValue = '';
+                                                                    if (is_array($col['field'])) {
+                                                                        // 如果是多欄位儲存，合併所有欄位的值
+                                                                        $vals = [];
+                                                                        foreach ($col['field'] as $f) {
+                                                                            if (!empty($row[$f])) $vals[] = $row[$f];
+                                                                        }
+                                                                        $fieldValue = implode(',', $vals);
+                                                                    } else {
+                                                                        $fieldValue = $row[$col['field']] ?? '';
+                                                                    }
+
+                                                                    if ($fieldValue === '') {
+                                                                        echo '-';
+                                                                        break;
+                                                                    }
+
+                                                                    // 處理多個 ID (逗號分隔)
+                                                                    $ids = explode(',', (string)$fieldValue);
+                                                                    $displayLabels = [];
                                                                     
                                                                     // 如果有定義 options，找出對應的 label
                                                                     if (isset($col['options']) && is_array($col['options'])) {
-                                                                        foreach ($col['options'] as $option) {
-                                                                            if (isset($option['value']) && $option['value'] == $fieldValue) {
-                                                                                $displayLabel = $option['label'] ?? $fieldValue;
-                                                                                break;
+                                                                        foreach ($ids as $id) {
+                                                                            $found = false;
+                                                                            $id = trim($id);
+                                                                            foreach ($col['options'] as $option) {
+                                                                                if (isset($option['value']) && $option['value'] == $id) {
+                                                                                    $displayLabels[] = $option['label'] ?? $id;
+                                                                                    $found = true;
+                                                                                    break;
+                                                                                }
                                                                             }
+                                                                            if (!$found) $displayLabels[] = $id;
                                                                         }
+                                                                    } else {
+                                                                        $displayLabels = $ids;
                                                                     }
                                                                     
-                                                                    echo htmlspecialchars($displayLabel, ENT_QUOTES, 'UTF-8');
+                                                                    echo htmlspecialchars(implode(', ', $displayLabels), ENT_QUOTES, 'UTF-8');
+                                                                    break;
+                                                                case 'category':
+                                                                    // 【新增】動態分類名稱顯示
+                                                                    $fieldValue = '';
+                                                                    if (is_array($col['field'])) {
+                                                                        $vals = [];
+                                                                        foreach ($col['field'] as $f) {
+                                                                            if (!empty($row[$f])) $vals[] = $row[$f];
+                                                                        }
+                                                                        $fieldValue = implode(',', $vals);
+                                                                    } else {
+                                                                        $fieldValue = $row[$col['field']] ?? '';
+                                                                    }
+
+                                                                    if ($fieldValue === '') {
+                                                                        echo '-';
+                                                                    } else {
+                                                                        $categoryLabel = getCategoryNamesByIds($col['category'] ?? '', $fieldValue);
+                                                                        echo htmlspecialchars($categoryLabel ?: $fieldValue, ENT_QUOTES, 'UTF-8');
+                                                                    }
+                                                                    break;
+                                                                case 'home_active':
+                                                                    $homeActiveVal = $row['d_home_active'] ?? 0;
+                                                                    echo renderHomeActiveToggle($homeActiveVal, $rowId);
+                                                                    break;
+                                                                case 'home_display_toggle':
+                                                                    // 【首頁顯示管理】切換首頁顯示按鈕
+                                                                    $isInHome = $row['is_in_home'] ?? 0;
+                                                                    $hdId = $row['hd_id'] ?? null;
+                                                                    $dataId = $row['d_id'] ?? 0;
+
+                                                                    $btnClass = $isInHome ? 'btn-success' : 'btn-default';
+                                                                    $btnText = $isInHome ? '已加入' : '加入首頁';
+                                                                    $btnIcon = $isInHome ? 'fa-check' : 'fa-plus';
+
+                                                                    echo "<button class='btn {$btnClass} btn-sm toggle-home-display'
+                                                                            data-data-id='{$dataId}'
+                                                                            data-module='{$targetModule}'
+                                                                            data-status='{$isInHome}'
+                                                                            data-lang='{$currentLang}'>
+                                                                            <i class='fas {$btnIcon}'></i> {$btnText}
+                                                                          </button>";
+                                                                    break;
+                                                                case 'home_sort':
+                                                                    // 【首頁顯示管理】排序欄位（只有已加入首頁的才顯示）
+                                                                    $isInHome = $row['is_in_home'] ?? 0;
+                                                                    if ($isInHome) {
+                                                                        $sortVal = $row['hd_sort'] ?? 0;
+                                                                        echo "<span class='sort-handle' style='cursor: move;'><i class='fas fa-grip-vertical'></i> {$sortVal}</span>";
+                                                                    } else {
+                                                                        echo "<span class='text-muted'>-</span>";
+                                                                    }
+                                                                    break;
+                                                                case 'home_sort_dropdown':
+                                                                    // 【首頁顯示管理】下拉選單排序（只有已加入首頁的才顯示）
+                                                                    $isInHome = $row['is_in_home'] ?? 0;
+                                                                    if ($isInHome) {
+                                                                        $hdId = $row['hd_id'] ?? 0;
+                                                                        $sortVal = $row['hd_sort'] ?? 0;
+
+                                                                        // 計算已加入首頁的項目總數
+                                                                        $countQuery = "SELECT COUNT(*) as total FROM home_display
+                                                                                      WHERE hd_module = :module AND lang = :lang AND hd_active = 1";
+                                                                        $countStmt = $conn->prepare($countQuery);
+                                                                        $countStmt->execute([
+                                                                            ':module' => $targetModule,
+                                                                            ':lang' => $currentLang
+                                                                        ]);
+                                                                        $totalInHome = $countStmt->fetch()['total'];
+
+                                                                        echo "<select class='form-control home-sort-select' data-hd-id='{$hdId}' data-module='{$targetModule}' data-lang='{$currentLang}' style='width: 60px;'>";
+                                                                        for ($i = 1; $i <= $totalInHome; $i++) {
+                                                                            $selected = ($i == $sortVal) ? 'selected' : '';
+                                                                            echo "<option value='{$i}' {$selected}>{$i}</option>";
+                                                                        }
+                                                                        echo "</select>";
+                                                                    } else {
+                                                                        echo "<span class='text-muted'>-</span>";
+                                                                    }
                                                                     break;
                                                                 case 'active':
                                                                     // 【修改】使用變數 $col_active
                                                                     $activeVal = $row[$col_active] ?? 1;
-                                                                    echo renderActiveToggle($activeVal, $rowId);
+                                                                    echo renderActiveToggle($activeVal, $rowId, $col_active);
                                                                     break;
                                                                 case 'read_toggle':
                                                                     // 【新增】已讀/未讀狀態切換
@@ -772,6 +1209,11 @@ require_once('display_page.php');
                                                                     $replyVal = $row[$col_reply] ?? 0;
                                                                     echo renderReplyStatus($replyVal);
                                                                     break;
+                                                                case 'status_badge':
+                                                                    // 【新增】處理狀態徽章顯示
+                                                                    $statusVal = $row[$col_status] ?? 'pending';
+                                                                    echo renderStatusBadge($statusVal);
+                                                                    break;
                                                                 case 'button':
                                                                     if ($col['field'] == 'pin') {
                                                                         // 【修改】使用變數 $col_top
@@ -780,23 +1222,36 @@ require_once('display_page.php');
                                                                     } elseif ($col['field'] == 'edit') {
                                                                         // 【權限檢查】只有有編輯權限才顯示
                                                                         if ($canEdit) {
-                                                                            echo renderEditButton($rowId, $module, $primaryKey);
+                                                                            $extraParams = [];
+                                                                            foreach ($_GET as $key => $value) {
+                                                                                if (strpos($key, 'selected') === 0 || $key === 'parent_id' || $key === 'language') {
+                                                                                    if ($value !== '' && $value !== 'all') $extraParams[$key] = $value;
+                                                                                }
+                                                                            }
+                                                                            echo renderEditButton($rowId, $module, $primaryKey, false, $extraParams);
                                                                         }
                                                                     } elseif ($col['field'] == 'delete') {
                                                                         // 【權限檢查】只有有刪除權限才顯示
                                                                         if ($canDelete) {
-                                                                            echo renderDeleteButton($rowId, $module, $hasTrash, $hasHierarchy);
+                                                                            echo renderDeleteButton($rowId, $module, $hasTrash, $hasHierarchy, $tableName);
                                                                         }
                                                                     } elseif ($col['field'] === 'view') {
                                                                         // 回收桶的查看按鈕 OR viewOnly 的查看按鈕
                                                                         $isTrashView = isset($_GET['trash']) && $_GET['trash'] == '1';
-                                                                        echo renderViewButton($rowId, $module, $primaryKey, $isTrashView);
+                                                                        $extraParams = [];
+                                                                        foreach ($_GET as $key => $value) {
+                                                                            if (strpos($key, 'selected') === 0 || $key === 'parent_id' || $key === 'language') {
+                                                                                if ($value !== '' && $value !== 'all') $extraParams[$key] = $value;
+                                                                            }
+                                                                        }
+                                                                        echo renderViewButton($rowId, $module, $primaryKey, $isTrashView, $extraParams);
                                                                     } elseif ($col['field'] === 'restore') {
                                                                         echo renderRestoreButton($rowId, $module);
                                                                     } elseif ($col['field'] === 'next_level') {
                                                                         // 【階層導航】下一層按鈕
                                                                         if ($hasHierarchicalNav) {
-                                                                            $nextLevelUrl = PORTAL_AUTH_URL."tpl={$module}/list?parent_id={$rowId}";
+                                                                            $trashParam = $isTrashMode ? '&trash=1' : '';
+                                                                            $nextLevelUrl = PORTAL_AUTH_URL."tpl={$module}/list?parent_id={$rowId}{$trashParam}";
                                                                             echo "<a href=\"{$nextLevelUrl}\" class=\"btn btn-primary\" title=\"下一層\"><i class=\"fas fa-level-down-alt\"></i></a>";
                                                                         }
                                                                     }
@@ -814,6 +1269,11 @@ require_once('display_page.php');
                                     <hr class="solid mt-5 opacity-4">
                                     <div class="datatable-footer">
                                         <div class="row align-items-center justify-content-between mt-3">
+                                            <?php
+                                            // 檢查是否顯示批次操作
+                                            $showBatchActions = $moduleConfig['listPage']['showBatchActions'] ?? true;
+                                            if ($showBatchActions):
+                                            ?>
                                             <div class="col-md-auto order-1 mb-3 mb-lg-0">
                                                 <div class="d-flex align-items-stretch">
                                                      <div class="d-grid gap-3 d-md-flex justify-content-md-end me-4">
@@ -848,6 +1308,7 @@ require_once('display_page.php');
                                                     </div>
                                                 </div>
                                             </div>
+                                            <?php endif; ?>
                                             <div class="col-lg-auto text-center order-3 order-lg-2">
                                                 <div class="results-info-wrapper"></div>
                                             </div>
@@ -871,6 +1332,11 @@ require_once('display_page.php');
 
 </html>
 
+<?php
+// 輸出統一的 SweetAlert2 確認提示函數
+SwalConfirmElement::render();
+?>
+
 <script type="text/javascript">
     // 新的 AJAX 排序邏輯
     function changeSort(pageNum, totalRows, itemId, newSort, categoryId) {
@@ -888,7 +1354,7 @@ require_once('display_page.php');
                 module: '<?php echo $module; ?>',
                 item_id: itemId,
                 new_sort: newSort,
-                category_id: categoryId || 0 // 【新增】傳遞分類 ID
+                category_id: categoryId || 0
             },
             dataType: 'json',
             success: function (response) {
@@ -907,17 +1373,19 @@ require_once('display_page.php');
                 console.log('Response Text:', xhr.responseText);
                 console.groupEnd();
 
-                const url = 'ajax_sort.php';
-                alert('排序失敗!\nURL: ' + url + '\n狀態碼: ' + xhr.status + '\n錯誤: ' + xhr.statusText + '\n\n請打開控制台(F12)查看詳細回傳內容');
+                alert('排序失敗！\n狀態碼: ' + xhr.status + '\n錯誤: ' + xhr.statusText + '\n\n請打開控制台(F12)查看詳細回傳內容');
                 $select.prop('disabled', false);
             }
         });
     }
 
     $(document).ready(function () {
-        // 分類切換
+        // 【修正】分類切換 - 只在非連動分類模式下執行
         $('#select1').change(function () {
-            window.location.href = "<?=PORTAL_AUTH_URL?>tpl=<?php echo $module; ?>/list?selected1=" + $(this).val();
+            // 如果存在 select2，表示是連動分類，不執行這個舊邏輯
+            if ($('#select2').length === 0) {
+                window.location.href = "<?=PORTAL_AUTH_URL?>tpl=<?php echo $module; ?>/list?selected1=" + $(this).val();
+            }
         });
     });
 
@@ -952,7 +1420,7 @@ require_once('display_page.php');
     }
 
     // 草稿/顯示/不顯示 切換功能
-    function toggleActive(element, itemId, nextValue) {
+    function toggleActive(element, itemId, nextValue, field = 'd_active') {
         const $badge = $(element);
         const module = '<?php echo $module; ?>';
 
@@ -962,7 +1430,8 @@ require_once('display_page.php');
             data: {
                 module: module,
                 item_id: itemId,
-                new_value: nextValue
+                new_value: nextValue,
+                field: field
             },
             dataType: 'json',
             success: function (response) {
@@ -987,25 +1456,11 @@ require_once('display_page.php');
         const itemId = $btn.data('id');
         const module = $btn.data('module');
 
-        Swal.fire({
-            title: '確定要還原嗎？',
-            text: '還原後此項目將回到正常列表',
-            icon: 'question',
-            showCancelButton: true,
-            confirmButtonColor: '#28a745',
-            cancelButtonColor: '#6c757d',
-            confirmButtonText: '確定還原',
-            cancelButtonText: '取消'
-        }).then((result) => {
-            if (result.isConfirmed) {
-                Swal.fire({
-                    title: '處理中...',
-                    text: '正在還原資料',
-                    allowOutsideClick: false,
-                    didOpen: () => {
-                        Swal.showLoading();
-                    }
-                });
+        showActionConfirm({
+            action: 'restore',
+            itemType: 'data',
+            onConfirm: () => {
+                showProcessing('正在還原資料');
 
                 $.ajax({
                     url: 'ajax_restore.php',
@@ -1017,31 +1472,15 @@ require_once('display_page.php');
                     dataType: 'json',
                     success: function (response) {
                         if (response.success) {
-                            Swal.fire({
-                                title: '還原成功！',
-                                text: '資料已成功還原',
-                                icon: 'success',
-                                confirmButtonColor: '#28a745'
-                            }).then(() => {
-                                // 返回回收桶列表
+                            showSuccess('還原成功！', '', () => {
                                 window.location.href = '<?=PORTAL_AUTH_URL?>tpl=' + module + '/list?trash=1';
                             });
                         } else {
-                            Swal.fire({
-                                title: '還原失敗',
-                                text: response.message || '發生未知錯誤',
-                                icon: 'error',
-                                confirmButtonColor: '#dc3545'
-                            });
+                            showError('還原失敗', response.message || '發生未知錯誤');
                         }
                     },
                     error: function () {
-                        Swal.fire({
-                            title: '請求失敗',
-                            text: '無法連接到伺服器，請稍後再試',
-                            icon: 'error',
-                            confirmButtonColor: '#dc3545'
-                        });
+                        showError('請求失敗', '無法連接到伺服器，請稍後再試');
                     }
                 });
             }
@@ -1057,69 +1496,69 @@ require_once('display_page.php');
         const module = $btn.data('module');
 
         // 第一階段：基本確認
-        const firstConfirm = await Swal.fire({
-            title: '確定要永久刪除嗎？',
-            html: '<strong style="color: #dc3545;">⚠️ 此操作無法復原！</strong><br>資料將被永久刪除',
-            icon: 'warning',
-            showCancelButton: true,
-            confirmButtonColor: '#dc3545',
-            confirmButtonText: '確定刪除',
-            cancelButtonText: '取消'
+        const firstConfirm = await showActionConfirm({
+            action: 'hard_delete',
+            itemType: 'data',
+            customMessage: '<strong style="color: #dc3545;">⚠️ 此操作無法復原！</strong><br>資料將被永久刪除',
+            useRawMessage: true
         });
 
-        if (!firstConfirm.isConfirmed) return;
+        if (!firstConfirm) return;
 
         // 顯示處理中
-        Swal.fire({
-            title: '處理中...',
-            text: '正在檢查並刪除資料',
-            allowOutsideClick: false,
-            didOpen: () => Swal.showLoading()
-        });
+        showProcessing('正在檢查並刪除資料');
 
         try {
             const response = await $.ajax({
-                url: 'ajax_permanent_delete.php',
+                url: 'ajax_delete.php',
                 type: 'POST',
-                data: { module, item_id: itemId, force: 0 }, // 先嘗試普通刪除
+                data: {
+                    module: module,
+                    item_id: itemId,
+                    trash: '1',  // 標記為垃圾桶模式，強制硬刪除
+                    force: 0
+                },
                 dataType: 'json'
             });
 
             if (response.success) {
                 showSuccessAndReload(module);
-            } else if (response.has_data) {
+            } else if (response.has_data || response.needs_force) {
                 // 第二階段：發現有子資料，提示串聯刪除
-                const secondConfirm = await Swal.fire({
-                    title: '分類內尚有資料',
-                    html: response.message + '<br>是否要連同這些文章一起「永久刪除」？',
-                    icon: 'error',
-                    showCancelButton: true,
-                    confirmButtonColor: '#dc3545',
-                    confirmButtonText: '全部刪除',
-                    cancelButtonText: '再考慮一下'
+                const secondConfirm = await showActionConfirm({
+                    action: 'hard_delete',
+                    itemType: 'data',
+                    customTitle: '分類內尚有資料',
+                    customMessage: response.message + '<br>是否要連同這些文章一起「永久刪除」？',
+                    useRawMessage: true
                 });
 
-                if (secondConfirm.isConfirmed) {
-                    Swal.fire({ title: '執行深度刪除...', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+                if (secondConfirm) {
+                    showProcessing('執行深度刪除...');
 
                     const forceResponse = await $.ajax({
-                        url: 'ajax_permanent_delete.php',
+                        url: 'ajax_delete.php',
                         type: 'POST',
-                        data: { module, item_id: itemId, force: 1 }, // 執意刪除
+                        data: {
+                            module: module,
+                            item_id: itemId,
+                            trash: '1',  // 標記為垃圾桶模式，強制硬刪除
+                            force: 1
+                        },
                         dataType: 'json'
                     });
 
                     if (forceResponse.success) {
                         showSuccessAndReload(module);
                     } else {
-                        showError(forceResponse.message);
+                        showErrorMsg(forceResponse.message);
                     }
                 }
             } else {
-                showError(response.message);
+                showErrorMsg(response.message);
             }
         } catch (e) {
-            showError('網路通訊失敗');
+            showErrorMsg('網路通訊失敗');
         }
     }
 
@@ -1129,153 +1568,50 @@ require_once('display_page.php');
 
 
     function showSuccessAndReload(module) {
-        Swal.fire({ title: '刪除成功！', icon: 'success' }).then(() => {
+        showSuccess('刪除成功！', '', () => {
             window.location.href = '<?=PORTAL_AUTH_URL?>tpl=' + module + '/list?trash=1';
         });
     }
 
-    function showError(msg) {
-        Swal.fire({ title: '操作失敗', text: msg, icon: 'error' });
+    function showErrorMsg(msg) {
+        showError('操作失敗', msg);
     }
 
-    // 全域函數：刪除功能（移至回收桶或直接刪除）
+    // 全域函數：單筆刪除功能（只跳一次提醒）
     function deleteItem(element) {
         const $btn = $(element);
         const itemId = $btn.data('id');
         const module = $btn.data('module');
         const hasTrash = $btn.data('has-trash');
         const hasHierarchy = $btn.data('has-hierarchy') == '1';
+        const tableName = $btn.data('table-name');
+        const isTrashMode = <?= $isTrashMode ? 'true' : 'false' ?>;
 
-        // 【新增】如果是階層式結構，先檢查是否有子分類
-        if (hasHierarchy) {
-            // 顯示檢查中
-            Swal.fire({
-                title: '檢查中...',
-                text: '正在檢查是否有子分類',
-                allowOutsideClick: false,
-                didOpen: () => Swal.showLoading()
-            });
-
-            // AJAX 檢查是否有子分類
-            $.ajax({
-                url: 'ajax_check_children.php',
-                method: 'GET',
-                data: { module: module, id: itemId },
-                dataType: 'json',
-                success: function(response) {
-                    Swal.close(); // 關閉檢查中的提示
-
-                    if (response.error) {
-                        showError(response.error);
-                        return;
-                    }
-
-                    // 根據是否有子分類顯示不同的確認訊息
-                    let title, text, icon, confirmButtonColor;
-                    
-                    if (response.hasChildren) {
-                        // 【修改】有子分類時的處理
-                        if (hasTrash == '1') {
-                            // 有回收桶：不提供級聯刪除選項，要求先刪除子分類
-                            title = '無法刪除';
-                            text = `此分類下還有 <strong style="color: #dc3545;">${response.count}</strong> 個子分類<br><br>` +
-                                   `<strong style="color: #dc3545;">⚠️ 使用回收桶的模組不支援級聯刪除</strong><br><br>` +
-                                   `請先手動刪除或移動所有子分類後再刪除此分類`;
-                            icon = 'error';
-                            
-                            Swal.fire({
-                                title: title,
-                                html: text,
-                                icon: icon,
-                                confirmButtonText: '知道了',
-                                confirmButtonColor: '#3085d6'
-                            });
-                        } else {
-                            // 無回收桶（硬刪除）：提供級聯刪除選項
-                            const warningText = `⚠️ 選擇「連同子分類一起刪除」將會永久刪除此分類及其所有子分類！`;
-                            
-                            title = '此分類下有子分類';
-                            text = `此分類下還有 <strong style="color: #dc3545;">${response.count}</strong> 個子分類<br><br>` +
-                                   `<strong style="color: #dc3545;">${warningText}</strong><br><br>` +
-                                   `或者您可以先手動刪除或移動子分類後再刪除此分類`;
-                            icon = 'warning';
-                            
-                            // 只提供2個按鈕：確認級聯刪除 或 取消
-                            Swal.fire({
-                                title: title,
-                                html: text,
-                                icon: icon,
-                                showCancelButton: true,
-                                confirmButtonText: '連同子分類一起永久刪除',
-                                cancelButtonText: '取消',
-                                confirmButtonColor: '#dc3545',
-                                cancelButtonColor: '#6c757d'
-                            }).then((result) => {
-                                if (result.isConfirmed) {
-                                    // 用戶選擇強制刪除（cascade delete）
-                                    executeDelete(module, itemId, 0, true); // 第四個參數表示 cascade
-                                }
-                                // 如果點擊取消，則不執行任何操作
-                            });
-                        }
-                    } else {
-                        // 沒有子分類，顯示正常的刪除確認
-                        if (hasTrash == '1') {
-                            title = '確定要刪除此分類嗎？';
-                            text = '資料將移至回收桶，可以稍後還原';
-                            icon = 'warning';
-                            confirmButtonColor = '#3085d6';
-                        } else {
-                            title = '確定要永久刪除此分類嗎？';
-                            text = '<strong style="color: #dc3545;">⚠️ 此操作無法復原，將直接刪除！</strong>';
-                            icon = 'warning';
-                            confirmButtonColor = '#dc3545';
-                        }
-
-                        Swal.fire({
-                            title: title,
-                            html: text,
-                            icon: icon,
-                            showCancelButton: true,
-                            confirmButtonColor: confirmButtonColor,
-                            cancelButtonColor: '#6c757d',
-                            confirmButtonText: '確定刪除',
-                            cancelButtonText: '取消'
-                        }).then((result) => {
-                            if (result.isConfirmed) {
-                                executeDelete(module, itemId, 0);
-                            }
-                        });
-                    }
-                },
-                error: function() {
-                    Swal.close();
-                    showError('檢查子分類時發生錯誤');
+        if (hasHierarchy || tableName === 'taxonomies') {
+            // 【修正】多層級分類模組：強迫使用硬刪除提示 (error icon)，因為階層刪除影響較大且通常為直接刪除
+            const confirmAction = hasHierarchy ? 'hard_delete' : ((hasTrash == '1' && !isTrashMode) ? 'soft_delete' : 'hard_delete');
+            showActionConfirm({
+                action: confirmAction,
+                itemType: 'category', // 使用分類名稱
+                onConfirm: () => {
+                    executeDelete(module, itemId, 0); 
                 }
             });
         } else {
-            // 非階層式結構，使用原本的刪除流程
-            const title = hasTrash == '1' ? '確定要刪除嗎？' : '確定要永久刪除嗎？';
-            const text = hasTrash == '1' ? '資料將移至回收桶，可以稍後還原' : '⚠️ 此操作無法復原，資料將被永久刪除！';
+            // 非階層式結構/非分類，使用簡單的確認流程
+            const confirmAction = (hasTrash == '1' && !isTrashMode) ? 'soft_delete' : 'hard_delete';
 
-            Swal.fire({
-                title: title,
-                html: text,
-                icon: 'warning',
-                showCancelButton: true,
-                confirmButtonColor: '#dc3545',
-                cancelButtonColor: '#6c757d',
-                confirmButtonText: '確定刪除',
-                cancelButtonText: '取消'
-            }).then((result) => {
-                if (result.isConfirmed) {
-                    executeDelete(module, itemId, 0);
+            showActionConfirm({
+                action: confirmAction,
+                itemType: 'data',
+                onConfirm: () => {
+                    executeDelete(module, itemId, 0, false, true); // 帶 confirm=true
                 }
             });
         }
     }
 
-    function executeDelete(module, itemId, force = 0, cascade = false) {
+    function executeDelete(module, itemId, force = 0, cascade = false, confirm = false) {
         // 顯示處理中
         Swal.fire({
             title: '處理中...',
@@ -1284,9 +1620,86 @@ require_once('display_page.php');
             didOpen: () => Swal.showLoading()
         });
 
-        // 使用 delete_handler.php 方式
-        const deleteUrl = `delete_handler.php?module=${module}&id=${itemId}${cascade ? '&cascade=1' : ''}`;
-        window.location.href = deleteUrl;
+        // 【修改】改用 AJAX 方式，支援顯示詳細提示
+        $.ajax({
+            url: 'ajax_batch_delete.php',
+            type: 'POST',
+            data: {
+                module: module,
+                item_ids: [itemId],
+                trash: '<?= $isTrashMode ? 1 : 0 ?>',
+                force: force,
+                cascade: cascade ? 1 : 0,
+                confirm: confirm ? 1 : 0
+            },
+            dataType: 'json',
+            success: function(response) {
+                if (response.success) {
+                    Swal.fire('成功', response.message, 'success').then(() => {
+                        window.location.reload();
+                    });
+                } else if (response.needs_confirm) {
+                    // 【新增】軟刪除確認提示（顯示分類和文章數量）
+                    Swal.fire({
+                        title: '確認移到垃圾桶',
+                        html: '<div style="line-height: 1.8; text-align: left;">' +
+                              response.message.replace(/\n/g, '<br>') +
+                              '<br><br>確定要繼續嗎？' +
+                              '</div>',
+                        icon: 'warning',
+                        showCancelButton: true,
+                        confirmButtonColor: '#3085d6',
+                        confirmButtonText: '確定刪除',
+                        cancelButtonText: '取消',
+                        width: '600px'
+                    }).then((result) => {
+                        if (result.isConfirmed) {
+                            executeDelete(module, itemId, 0, cascade, true); // 帶 confirm 參數
+                        }
+                    });
+                } else if (response.needs_force || response.has_data) {
+                    // 【修改】永久刪除警告（顯示分類和文章數量）
+                    Swal.fire({
+                        title: '分類內有關聯的文章',
+                        html: '<div style="line-height: 1.8; text-align: left;">' +
+                              '' +
+                              response.message.replace(/\n/g, '<br>') +
+                              '<strong style="color: #dc3545;">此操作無法復原，是否要繼續？</strong>' +
+                              '</div>',
+                        icon: 'warning',
+                        showCancelButton: true,
+                        confirmButtonColor: '#dc3545',
+                        confirmButtonText: '刪除',
+                        cancelButtonText: '取消',
+                        width: '600px'
+                    }).then((result) => {
+                        if (result.isConfirmed) {
+                            executeDelete(module, itemId, 1, cascade); // 強制刪除
+                        }
+                    });
+                } else if (response.has_children) {
+                    // 【保留】處理有子項目的情況
+                    Swal.fire({
+                        title: '此分類下尚有子項目',
+                        text: response.message,
+                        icon: 'warning',
+                        showCancelButton: true,
+                        confirmButtonColor: '#dc3545',
+                        confirmButtonText: '級聯刪除（包含子項目）',
+                        cancelButtonText: '取消'
+                    }).then((result) => {
+                        if (result.isConfirmed) {
+                            executeDelete(module, itemId, force, true); // 級聯刪除
+                        }
+                    });
+                } else {
+                    Swal.fire('失敗', response.message, 'error');
+                }
+            },
+            error: function() {
+                Swal.fire('錯誤', '無法連接到伺服器', 'error');
+            }
+        });
     }
 
     /**
@@ -1321,21 +1734,40 @@ require_once('display_page.php');
             }
 
             if (action === 'delete') {
-                // 批次刪除
-                Swal.fire({
-                    title: '確定要刪除嗎？',
-                    text: "所選的 " + itemIds.length + " 筆資料將被刪除",
-                    icon: 'warning',
-                    showCancelButton: true,
-                    confirmButtonColor: '#3085d6',
-                    cancelButtonColor: '#d33',
-                    confirmButtonText: '確定',
-                    cancelButtonText: '取消'
-                }).then((result) => {
-                    if (result.isConfirmed) {
-                        executeBatchDelete(itemIds);
-                    }
-                });
+                // 【修改】批次刪除 - 只跳一次提醒
+                const isTrashMode = <?= $isTrashMode ? 'true' : 'false' ?>;
+                const isCategoryModule = <?= ($moduleConfig['tableName'] === 'taxonomies') ? 'true' : 'false' ?>;
+                const hasHierarchy = <?= $hasHierarchy ? 'true' : 'false' ?>;
+                
+                // 1. 如果是分類模組
+                if (isCategoryModule) {
+                    // 【修正】多層級分類模組：強迫使用硬刪除提示
+                    const isHardDelete = (hasHierarchy || isTrashMode);
+                    const confirmAction = isHardDelete ? 'hard_delete' : 'soft_delete';
+                    showActionConfirm({
+                        action: confirmAction,
+                        itemType: 'category',
+                        customMessage: `確定要${isHardDelete ? '永久刪除' : '將'}選取的 ${itemIds.length} 筆分類${isHardDelete ? '' : '移到垃圾桶'}嗎？<br><br>確定要繼續嗎？`,
+                        onConfirm: () => {
+                            executeBatchDelete(itemIds); 
+                        }
+                    });
+                } else {
+                    // 2. 如果是一般資料模組，直接跳一個簡單的確認提示
+                    const typeName = '資料';
+                    // 如果在垃圾桶模式，或者是多層級結構（雖然數據模組較少見，但保持一致），強制使用硬刪除提示
+                    const isHardDelete = (isTrashMode || hasHierarchy);
+                    const confirmAction = isHardDelete ? 'hard_delete' : 'soft_delete';
+                    
+                    showActionConfirm({
+                        action: confirmAction,
+                        itemType: 'data',
+                        customMessage: `確定要${isHardDelete ? '永久刪除' : '將'}選取的 ${itemIds.length} 筆${typeName}${isHardDelete ? '' : '移到垃圾桶'}嗎？<br><br>確定要繼續嗎？`,
+                        onConfirm: () => {
+                            executeBatchDelete(itemIds, 0, true); // 帶 confirm=true，避免後端再次要求確認（雖然資料模組後端通常不要求確認）
+                        }
+                    });
+                }
             } else if (action === 'restore') {
                 // 批次還原
                 Swal.fire({
@@ -1359,33 +1791,22 @@ require_once('display_page.php');
                     Swal.fire('提醒', '請先選擇目標語系', 'warning');
                     return;
                 }
-                Swal.fire({
-                    title: '確定要複製嗎？',
-                    text: `即將複製 ${itemIds.length} 筆資料到 ${targetLang} 語系`,
-                    icon: 'info',
-                    showCancelButton: true,
-                    confirmButtonColor: '#3085d6',
-                    cancelButtonColor: '#6c757d',
-                    confirmButtonText: '確定複製',
-                    cancelButtonText: '取消'
-                }).then((result) => {
-                    if (result.isConfirmed) {
+                
+                showActionConfirm({
+                    action: 'clone',
+                    itemType: 'data',
+                    customMessage: `確定要複製所選的 ${itemIds.length} 筆資料到 <strong style="color: #3085d6;">${targetLang}</strong> 語系嗎？`,
+                    onConfirm: () => {
                         executeBatchClone(itemIds, targetLang);
                     }
                 });
             } else if (action === 'clone_local') {
                 // 批次複製 (同語系)
-                Swal.fire({
-                    title: '確定要複製嗎？',
-                    text: `即將複製 ${itemIds.length} 筆資料`,
-                    icon: 'info',
-                    showCancelButton: true,
-                    confirmButtonColor: '#3085d6',
-                    cancelButtonColor: '#6c757d',
-                    confirmButtonText: '確定複製',
-                    cancelButtonText: '取消'
-                }).then((result) => {
-                    if (result.isConfirmed) {
+                showActionConfirm({
+                    action: 'clone',
+                    itemType: 'data',
+                    customMessage: `確定要複製所選的 ${itemIds.length} 筆資料嗎？`,
+                    onConfirm: () => {
                         executeBatchClone(itemIds, '<?= $currentLang ?>');
                     }
                 });
@@ -1410,7 +1831,7 @@ require_once('display_page.php');
             dataType: 'json',
             success: function(response) {
                 if (response.success) {
-                    Swal.fire('成功', response.message, 'success').then(() => {
+                    Swal.fire('還原成功！', '', 'success').then(() => {
                         window.location.reload();
                     });
                 } else {
@@ -1423,7 +1844,7 @@ require_once('display_page.php');
         });
     }
 
-    function executeBatchDelete(itemIds, force = 0) {
+    function executeBatchDelete(itemIds, force = 0, confirm = false) {
         Swal.fire({
             title: '處理中...',
             didOpen: () => Swal.showLoading()
@@ -1436,7 +1857,8 @@ require_once('display_page.php');
                 module: '<?= $module ?>',
                 item_ids: itemIds,
                 trash: '<?= $isTrashMode ? 1 : 0 ?>',
-                force: force
+                force: force,
+                confirm: confirm ? 1 : 0
             },
             dataType: 'json',
             success: function(response) {
@@ -1444,21 +1866,40 @@ require_once('display_page.php');
                     Swal.fire('成功', response.message, 'success').then(() => {
                         window.location.reload();
                     });
-                } else if (response.has_data) {
-                    // 【新增】第二階段：發現有關連資料
+                } else if (response.needs_confirm) {
+                    // 【新增】軟刪除確認提示（顯示分類和文章數量）
                     Swal.fire({
-                        title: '分類內尚有資料',
-                        html: '<div style="line-height: 1.8;">' +
-                              '<strong>以下分類無法刪除：</strong><br><br>' + 
-                              response.message.replace(/\n/g, '<br>') + 
-                              '<br><br>是否要連同這些文章「全部永久刪除」？' +
+                        title: '確認移到垃圾桶',
+                        html: '<div style="line-height: 1.8; text-align: left;">' +
+                              response.message.replace(/\n/g, '<br>') +
+                              '<br><br>確定要繼續嗎？' +
                               '</div>',
-                        icon: 'error',
+                        icon: 'warning',
+                        showCancelButton: true,
+                        confirmButtonColor: '#3085d6',
+                        confirmButtonText: '確定刪除',
+                        cancelButtonText: '取消',
+                        width: '600px'
+                    }).then((result) => {
+                        if (result.isConfirmed) {
+                            executeBatchDelete(itemIds, 0, true); // 帶 confirm 參數
+                        }
+                    });
+                } else if (response.needs_force || response.has_data) {
+                    // 【修改】永久刪除警告（顯示分類和文章數量）
+                    Swal.fire({
+                        title: '確認永久刪除',
+                        html: '<div style="line-height: 1.8; text-align: left;">' +
+                              '<strong style="color: #dc3545;">以下分類及其文章將被永久刪除：</strong><br><br>' +
+                              response.message.replace(/\n/g, '<br>') +
+                              '<br><br><strong style="color: #dc3545;">此操作無法復原，確定要繼續嗎？</strong>' +
+                              '</div>',
+                        icon: 'warning',
                         showCancelButton: true,
                         confirmButtonColor: '#dc3545',
-                        confirmButtonText: '全部刪除',
-                        cancelButtonText: '再考慮一下',
-                        width: '500px'
+                        confirmButtonText: '刪除',
+                        cancelButtonText: '取消',
+                        width: '600px'
                     }).then((result) => {
                         if (result.isConfirmed) {
                             executeBatchDelete(itemIds, 1); // 強制刪除
@@ -1498,7 +1939,272 @@ require_once('display_page.php');
                 } else {
                     Swal.fire('失敗', response.message, 'error');
                 }
+            },
+            error: function(xhr, status, error) {
+                console.error('複製失敗:', error, xhr.responseText);
+                Swal.fire('錯誤', '複製過程中發生連線或伺服器錯誤', 'error');
             }
         });
     }
+
+    // ========================================
+    // 【首頁顯示管理】相關功能
+    // ========================================
+
+    // 模組選擇器切換
+    function changeTargetModule(module) {
+        window.location.href = '<?= PORTAL_AUTH_URL ?>tpl=homeDisplay/list&target_module=' + module + '&language=<?= $currentLang ?>';
+    }
+
+    // 切換首頁顯示狀態
+    $(document).on('click', '.toggle-home-display', function() {
+        const btn = $(this);
+        const dataId = btn.data('data-id');
+        const module = btn.data('module');
+        const currentStatus = btn.data('status');
+        const lang = btn.data('lang');
+
+        // 顯示載入狀態
+        btn.prop('disabled', true);
+        const originalHtml = btn.html();
+        btn.html('<i class="fas fa-spinner fa-spin"></i> 處理中...');
+
+        $.ajax({
+            url: 'ajax_toggle_home_display.php',
+            method: 'POST',
+            data: {
+                data_id: dataId,
+                module: module,
+                current_status: currentStatus,
+                lang: lang
+            },
+            dataType: 'json',
+            success: function(response) {
+                if (response.success) {
+                    // 更新按鈕狀態
+                    const newStatus = response.new_status;
+                    btn.data('status', newStatus);
+
+                    if (newStatus == 1) {
+                        btn.removeClass('btn-default').addClass('btn-success');
+                        btn.html('<i class="fas fa-check"></i> 已加入');
+                    } else {
+                        btn.removeClass('btn-success').addClass('btn-default');
+                        btn.html('<i class="fas fa-plus"></i> 加入首頁');
+                    }
+
+                    // 顯示成功訊息
+                    Swal.fire({
+                        icon: 'success',
+                        title: response.message,
+                        toast: true,
+                        position: 'top-end',
+                        showConfirmButton: false,
+                        timer: 2000
+                    });
+
+                    // 重新載入頁面以更新排序
+                    setTimeout(function() {
+                        window.location.reload();
+                    }, 500);
+                } else {
+                    Swal.fire('錯誤', response.error, 'error');
+                    btn.html(originalHtml);
+                }
+                btn.prop('disabled', false);
+            },
+            error: function() {
+                Swal.fire('錯誤', '無法連接到伺服器', 'error');
+                btn.html(originalHtml);
+                btn.prop('disabled', false);
+            }
+        });
+    });
+
+    // 【首頁顯示管理】下拉選單排序功能
+    $(document).on('change', '.home-sort-select', function() {
+        const select = $(this);
+        const hdId = select.data('hd-id');
+        const newSort = select.val();
+        const module = select.data('module');
+        const lang = select.data('lang');
+
+        // 顯示載入狀態
+        select.prop('disabled', true);
+
+        $.ajax({
+            url: 'ajax_update_home_sort.php',
+            method: 'POST',
+            data: {
+                hd_id: hdId,
+                new_sort: newSort,
+                module: module,
+                lang: lang
+            },
+            dataType: 'json',
+            success: function(response) {
+                if (response.success) {
+                    Swal.fire({
+                        icon: 'success',
+                        title: '排序已更新',
+                        toast: true,
+                        position: 'top-end',
+                        showConfirmButton: false,
+                        timer: 1500
+                    });
+                    // 重新載入頁面
+                    setTimeout(function() {
+                        window.location.reload();
+                    }, 800);
+                } else {
+                    Swal.fire('錯誤', response.error, 'error');
+                    select.prop('disabled', false);
+                }
+            },
+            error: function() {
+                Swal.fire('錯誤', '無法更新排序', 'error');
+                select.prop('disabled', false);
+            }
+        });
+    });
+
+    // 【首頁顯示管理】拖曳排序功能
+    <?php if ($isHomeDisplayModule): ?>
+    $(document).ready(function() {
+        // 使用 Sortable.js 實現拖曳排序
+        const tbody = document.querySelector('tbody');
+        if (tbody && typeof Sortable !== 'undefined') {
+            Sortable.create(tbody, {
+                handle: '.sort-handle',
+                animation: 150,
+                onEnd: function(evt) {
+                    // 收集所有已加入首頁的項目 ID（按新順序）
+                    const sortData = [];
+                    $('tbody tr').each(function() {
+                        const row = $(this);
+                        const isInHome = row.find('.toggle-home-display').data('status');
+                        if (isInHome == 1) {
+                            const hdId = row.find('[data-hd-id]').data('hd-id');
+                            if (hdId) {
+                                sortData.push(hdId);
+                            }
+                        }
+                    });
+
+                    if (sortData.length > 0) {
+                        // 發送 AJAX 更新排序
+                        $.ajax({
+                            url: 'ajax_sort_home_display.php',
+                            method: 'POST',
+                            data: {
+                                sort_data: sortData.join(','),
+                                module: '<?= $targetModule ?>',
+                                lang: '<?= $currentLang ?>'
+                            },
+                            dataType: 'json',
+                            success: function(response) {
+                                if (response.success) {
+                                    Swal.fire({
+                                        icon: 'success',
+                                        title: '排序已更新',
+                                        toast: true,
+                                        position: 'top-end',
+                                        showConfirmButton: false,
+                                        timer: 1500
+                                    });
+                                    // 重新載入頁面
+                                    setTimeout(function() {
+                                        window.location.reload();
+                                    }, 300);
+                                } else {
+                                    Swal.fire('錯誤', response.error, 'error');
+                                }
+                            },
+                            error: function() {
+                                Swal.fire('錯誤', '無法更新排序', 'error');
+                            }
+                        });
+                    }
+                }
+            });
+        }
+    });
+    <?php endif; ?>
+
+    // 【重構】動態連動分類篩選功能
+    $(document).ready(function() {
+        // 標記是否為連動分類模式
+        const isLinkedCategory = $('.category-filter').length > 0;
+        
+        if (!isLinkedCategory) return;
+
+        // 處理每一層分類變更
+        $('.category-filter').on('change', function() {
+            const $this = $(this);
+            const level = $this.data('level');
+            const val = $this.val();
+            const categoryName = $this.data('category');
+            
+            // 如果選擇了「全部」或空值
+            if (val === 'all' || val === '') {
+                const url = new URL(window.location);
+                // 移除當前層級及之後的所有層級參數
+                for (let l = level; l <= 10; l++) {
+                    url.searchParams.delete('selected' + l);
+                }
+                url.searchParams.delete('pageNum');
+                window.location.href = url.toString();
+                return;
+            }
+
+            // 檢查是否有下一層
+            const $nextSelect = $('#select' + (level + 1));
+            if ($nextSelect.length > 0) {
+                // 有下一層，嘗試載入子分類
+                $.ajax({
+                    url: 'includes/ajax_get_child_categories.php',
+                    type: 'GET',
+                    data: {
+                        category: categoryName,
+                        parent_id: val,
+                        lang: '<?= $currentLang ?>'
+                    },
+                    dataType: 'json',
+                    success: function(response) {
+                        if (response.success && response.categories.length > 0) {
+                            // 有子分類，跳轉到第一個子分類以維持階層完整性
+                            const firstChildId = response.categories[0].id;
+                            const url = new URL(window.location);
+                            url.searchParams.set('selected' + level, val);
+                            url.searchParams.set('selected' + (level + 1), firstChildId);
+                            url.searchParams.delete('pageNum');
+                            window.location.href = url.toString();
+                        } else {
+                            // 沒有子分類，直接在當前層級過濾，並移除後續層級參數
+                            const url = new URL(window.location);
+                            url.searchParams.set('selected' + level, val);
+                            for (let l = level + 1; l <= 10; l++) {
+                                url.searchParams.delete('selected' + l);
+                            }
+                            url.searchParams.delete('pageNum');
+                            window.location.href = url.toString();
+                        }
+                    },
+                    error: function() {
+                        // 發生錯誤，退而求其次在當前層級過濾
+                        const url = new URL(window.location);
+                        url.searchParams.set('selected' + level, val);
+                        url.searchParams.delete('pageNum');
+                        window.location.href = url.toString();
+                    }
+                });
+            } else {
+                // 沒有下一層了，直接過濾
+                const url = new URL(window.location);
+                url.searchParams.set('selected' + level, val);
+                url.searchParams.delete('pageNum');
+                window.location.href = url.toString();
+            }
+        });
+    });
 </script>

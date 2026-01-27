@@ -28,8 +28,10 @@ $col_file_fk = $moduleConfig['cols']['file_fk'] ?? 'file_d_id';
 try {
     $conn->beginTransaction();
 
+    $skipRelationCheck = $moduleConfig['listPage']['skipRelationCheck'] ?? false;
+
     // --- 防呆檢查：如果是分類模組，檢查是否有關聯文章 ---
-    if (strpos($module, 'Cate') !== false) {
+    if (strpos($module, 'Cate') !== false && !$skipRelationCheck) {
         $mainModule = str_replace('Cate', '', $module);
         $mainConfigFile = __DIR__ . "/set/{$mainModule}Set.php";
         
@@ -76,9 +78,75 @@ try {
     // --- 刪除分類本身的檔案與資料 ---
     deleteRelatedFiles($conn, $col_file_fk, $itemId);
     $conn->prepare("DELETE FROM file_set WHERE {$col_file_fk} = :id")->execute([':id' => $itemId]);
-    
+
     $stmt = $conn->prepare("DELETE FROM {$tableName} WHERE {$col_id} = :item_id");
     $stmt->execute([':item_id' => $itemId]);
+
+    // 【新增】刪除後重新整理排序編號（讓排序連續）
+    $col_sort = $moduleConfig['cols']['sort'] ?? 'd_sort';
+    $col_delete_time = $moduleConfig['cols']['delete_time'] ?? 'd_delete_time';
+
+    // 檢查是否有排序欄位
+    $stmtCheckSort = $conn->prepare("SHOW COLUMNS FROM `{$tableName}` LIKE ?");
+    $stmtCheckSort->execute([$col_sort]);
+    $hasSortColumn = (bool)$stmtCheckSort->fetch();
+
+    // 檢查是否有刪除時間欄位（用於判斷是否支援軟刪除）
+    $stmtCheckDelete = $conn->prepare("SHOW COLUMNS FROM `{$tableName}` LIKE ?");
+    $stmtCheckDelete->execute([$col_delete_time]);
+    $hasDeleteTime = (bool)$stmtCheckDelete->fetch();
+
+    if ($hasSortColumn) {
+        require_once(__DIR__ . '/includes/SortReorganizer.php');
+        
+        // 【新增】判斷是否為階層式結構
+        $hasHierarchy = $moduleConfig['listPage']['hasHierarchy'] ?? false;
+        $parentIdField = $moduleConfig['cols']['parent_id'] ?? null;
+        $categoryField = $moduleConfig['listPage']['categoryField'] ?? null;
+        $menuKey = $moduleConfig['menuKey'] ?? null;
+        $menuValue = $moduleConfig['menuValue'] ?? null;
+        
+        // 【修正】如果 menuValue 為 null 且有 menuKey,從被刪除的資料中讀取
+        if ($menuValue === null && $menuKey && $tableName === 'taxonomies') {
+            // 查詢被刪除項目的 menuKey 值 (例如 taxonomy_type_id)
+            $stmt = $conn->prepare("SELECT {$menuKey} FROM {$tableName} WHERE {$col_id} = :item_id");
+            $stmt->execute([':item_id' => $itemId]);
+            $deletedItem = $stmt->fetch(PDO::FETCH_ASSOC);
+            if ($deletedItem) {
+                $menuValue = $deletedItem[$menuKey];
+            }
+        }
+        
+        if ($hasHierarchy && $parentIdField) {
+            // 【多層分類】按 menuKey + parent_id 分組排序
+            SortReorganizer::reorganizeAll(
+                $conn,
+                $tableName,
+                $col_id,
+                $col_sort,
+                $menuKey,
+                $hasDeleteTime,
+                $col_delete_time,
+                null,              // categoryField 不使用
+                $parentIdField,    // 使用 parent_id 分層
+                $menuValue         // 限定只處理當前模組
+            );
+        } else {
+            // 【單層分類】只按 menuKey 分組排序
+            SortReorganizer::reorganizeAll(
+                $conn,
+                $tableName,
+                $col_id,
+                $col_sort,
+                $menuKey,
+                $hasDeleteTime,
+                $col_delete_time,
+                $categoryField,
+                null,              // 不使用 parent_id
+                $menuValue         // 限定只處理當前模組
+            );
+        }
+    }
 
     $conn->commit();
     echo json_encode(['success' => true]);

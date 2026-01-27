@@ -1,25 +1,64 @@
 <?php
 require_once '../Connections/connect2data.php';
 
-function file_process(PDO $pdo, $file_name, $deal_type) {
+function file_process(PDO $pdo, $file_name, $deal_type, $accept = null) {
     //echo count($_FILES['upfile']['name']);//上傳物件數量
     //echo count($_REQUEST[upfile_title]);//上傳物件的說明之數量
     //echo $_FILES['upfile']['tmp_name'][0];
 
     $all_file_name = array(); //建立回傳的資料陣列
 
-    // 允許上傳的 MIME 類型（比副檔名更安全）
-    $allowed_mimes = [
-        'image/jpeg',
-        'image/jpg',
-        'image/png',
-        'image/gif',
-        'image/webp',
-        'application/pdf'
-    ];
+    // 解析 accept 參數
+    $acceptFormat = '*';
+    $maxSize = 0; // 0 表示不限制 (MB)
 
-    // 白名單（可以自訂）
-    // $allowed_mimes = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'pdf'];
+    if (is_array($accept)) {
+        $acceptFormat = $accept['format'] ?? '*';
+        $maxSize = $accept['maxSize'] ?? 0;
+    } elseif (is_string($accept)) {
+        $acceptFormat = $accept;
+    }
+
+    // 根據 acceptFormat 動態生成允許的 MIME 類型
+    $allowed_mimes = [];
+
+    if ($acceptFormat !== '*') {
+        // 副檔名到 MIME 類型的映射
+        $ext_to_mime = [
+            'jpg'  => 'image/jpeg',
+            'jpeg' => 'image/jpeg',
+            'png'  => 'image/png',
+            'gif'  => 'image/gif',
+            'webp' => 'image/webp',
+            'pdf'  => 'application/pdf',
+            'doc'  => 'application/msword',
+            'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'xls'  => 'application/vnd.ms-excel',
+            'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'zip'  => 'application/zip',
+            'rar'  => 'application/x-rar-compressed',
+        ];
+
+        // 解析 acceptFormat (例如: ".pdf,.jpg,.png")
+        $extensions = array_map('trim', explode(',', str_replace('.', '', $acceptFormat)));
+
+        foreach ($extensions as $ext) {
+            $ext = strtolower($ext);
+            if (isset($ext_to_mime[$ext])) {
+                $allowed_mimes[] = $ext_to_mime[$ext];
+            }
+        }
+    } else {
+        // 如果是 '*',允許所有常見類型
+        $allowed_mimes = [
+            'image/jpeg',
+            'image/jpg',
+            'image/png',
+            'image/gif',
+            'image/webp',
+            'application/pdf'
+        ];
+    }
 
     //******產生相對應的資料夾begin*******//
     // $file_path = "upload_file";
@@ -57,7 +96,7 @@ function file_process(PDO $pdo, $file_name, $deal_type) {
         if ($_FILES['upfile']['error'][$j] !== UPLOAD_ERR_OK) {
             continue;
         }
-        
+
         $tmp_name = $_FILES['upfile']['name'][$j];
         // ⭐ 取得暫存檔案
         $tmp_file = $_FILES['upfile']['tmp_name'][$j];
@@ -65,20 +104,33 @@ function file_process(PDO $pdo, $file_name, $deal_type) {
         // if ($tmp_name != '') //如果有上傳檔案
         if ($tmp_file != '') //如果有上傳檔案
         {
+            // ---------------------------------------------------------
+            // ⭐ (1) 檔案大小驗證
+            // ---------------------------------------------------------
+            if ($maxSize > 0) {
+                $fileSize = $_FILES['upfile']['size'][$j];
+                $maxSizeBytes = $maxSize * 1024 * 1024; // 轉換為 bytes
+
+                if ($fileSize > $maxSizeBytes) {
+                    $fileSizeMB = round($fileSize / 1024 / 1024, 2);
+                    echo "檔案「{$tmp_name}」大小超過限制！最大允許：{$maxSize}MB，檔案大小：{$fileSizeMB}MB";
+                    exit;
+                }
+            }
 
             // $file_type = end(explode(".", $_FILES['upfile']['name'][$j])); //將檔案已"."分開，放到陣,列呼叫array最後一個資料,為檔案副檔名
 
             $file_type = strtolower(pathinfo($_FILES['upfile']['name'][$j], PATHINFO_EXTENSION)); //將檔案已"."分開，放到陣,列呼叫array最後一個資料,為檔案副檔名
 
             // ---------------------------------------------------------
-            // ⭐ (1) 使用 finfo 確認 MIME 類型
+            // ⭐ (2) 使用 finfo 確認 MIME 類型
             // ---------------------------------------------------------
             $finfo = finfo_open(FILEINFO_MIME_TYPE);
             $mime  = finfo_file($finfo, $tmp_file);
             finfo_close($finfo);
 
-            if (!in_array($mime, $allowed_mimes)) {
-                echo "不允許的檔案類型：{$mime}";
+            if (!empty($allowed_mimes) && !in_array($mime, $allowed_mimes)) {
+                echo "不允許的檔案類型：{$mime}。允許的格式：{$acceptFormat}";
                 // continue;
                 exit;
             }

@@ -198,7 +198,7 @@ if (isset($_POST['use_rname'])) {
 <!doctype html>
 <html class="fixed">
 	<head>
-        <title><?php require_once('cmsTitle.php'); ?></title>
+
 		<!-- Basic -->
 		<meta charset="UTF-8">
 

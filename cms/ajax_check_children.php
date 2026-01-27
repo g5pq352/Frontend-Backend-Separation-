@@ -38,22 +38,40 @@ try {
     $cols = $moduleConfig['cols'] ?? [];
     $parentIdField = $cols['parent_id'] ?? null;
 
-    // 如果沒有 parent_id 欄位，表示不是階層式結構
-    if (!$parentIdField) {
-        echo json_encode(['hasChildren' => false, 'count' => 0]);
-        exit;
+    // 查詢子分類數量（如果是階層式結構）
+    $childCount = 0;
+    if ($parentIdField) {
+        $query = "SELECT COUNT(*) as child_count FROM {$tableName} WHERE {$parentIdField} = :id";
+        $stmt = $conn->prepare($query);
+        $stmt->execute([':id' => $id]);
+        $result = $stmt->fetch(PDO::FETCH_ASSOC);
+        $childCount = (int)$result['child_count'];
     }
 
-    // 查詢子分類數量
-    $query = "SELECT COUNT(*) as child_count FROM {$tableName} WHERE {$parentIdField} = :id";
-    $stmt = $conn->prepare($query);
-    $stmt->execute([':id' => $id]);
-    $result = $stmt->fetch(PDO::FETCH_ASSOC);
+    // 【修改】檢查是否有關聯的文章（透過 data_taxonomy_map）
+    // 只有當資料表是 taxonomies 時才檢查文章關聯
+    $skipRelationCheck = $moduleConfig['listPage']['skipRelationCheck'] ?? false;
+    $articleCount = 0;
+    if ($tableName === 'taxonomies' && !$skipRelationCheck) {
+        $checkMapTable = $conn->prepare("SHOW TABLES LIKE 'data_taxonomy_map'");
+        $checkMapTable->execute();
+
+        if ($checkMapTable->rowCount() > 0) {
+            // 如果 data_taxonomy_map 表存在，檢查是否有關聯的文章
+            $articleQuery = "SELECT COUNT(*) as article_count FROM data_taxonomy_map WHERE t_id = :id";
+            $articleStmt = $conn->prepare($articleQuery);
+            $articleStmt->execute([':id' => $id]);
+            $articleResult = $articleStmt->fetch(PDO::FETCH_ASSOC);
+            $articleCount = (int)$articleResult['article_count'];
+        }
+    }
 
     // 回傳結果
     echo json_encode([
-        'hasChildren' => $result['child_count'] > 0,
-        'count' => (int)$result['child_count']
+        'hasChildren' => $childCount > 0,
+        'count' => $childCount,
+        'hasArticles' => $articleCount > 0,
+        'articleCount' => $articleCount
     ]);
 
 } catch (Exception $e) {

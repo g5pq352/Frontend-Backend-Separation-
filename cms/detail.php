@@ -205,6 +205,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$isTrashView) {
             $fields['lang'] = $autoLangContext;
         }
 
+        // 【新增】自動處理 canCreate 標籤
+        foreach ($moduleConfig['detailPage'] as $sheet) {
+            $items = isset($sheet['items']) ? $sheet['items'] : [$sheet];
+            foreach ($items as $item) {
+                if (!empty($item['canCreate']) && !empty($item['field'])) {
+                    $fName = $item['field'];
+                    $categoryName = $item['category'] ?? '';
+                    if (!empty($fields[$fName]) && !empty($categoryName)) {
+                        $fields[$fName] = processAutoCreateTags($conn, $categoryName, $fields[$fName], [
+                            'lang' => $fields['lang'] ?? $autoLangContext
+                        ]);
+                    }
+                }
+            }
+        }
+
         // 5. 管理員密碼處理
         if ($module === 'admin' && isset($fields['user_password'])) {
             if (!empty($fields['user_password'])) {

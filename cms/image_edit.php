@@ -2,7 +2,7 @@
 require_once('../Connections/connect2data.php');
 require_once 'auth.php';
 ?>
-<?php require_once('photo_process.php'); ?>
+<?php require_once('upload_process.php'); ?>
 <?php require_once('imagesSize.php'); ?>
 
 <?php

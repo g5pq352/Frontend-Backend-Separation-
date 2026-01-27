@@ -280,8 +280,9 @@ function renderCategorySelect($categoryName, $fieldName, $selectedValue = null, 
     $styleAttr = $multiple ? 'style="width: 80%;"' : '';
     $tabindexAttr = $multiple ? 'tabindex="4"' : '';
     $requiredAttr = ($options['required'] ?? false) ? 'required' : '';
+    $canCreateAttr = ($options['canCreate'] ?? false) ? 'data-can-create="true" data-tags="true"' : '';
 
-    $html = "<select name=\"{$nameAttr}\" id=\"{$fieldName}\" class=\"{$class}\" data-plugin-selectTwo {$multipleAttr} {$dataPlaceholder} {$styleAttr} {$tabindexAttr} {$requiredAttr}>";
+    $html = "<select name=\"{$nameAttr}\" id=\"{$fieldName}\" class=\"{$class}\" data-plugin-selectTwo {$multipleAttr} {$dataPlaceholder} {$styleAttr} {$tabindexAttr} {$requiredAttr} {$canCreateAttr}>";
     
     foreach ($categories as $cat) {
         if ($multiple) {
@@ -585,5 +586,108 @@ function getCategoryNamesByIds($categoryName, $ids)
     } catch (Exception $e) {
         return implode(', ', $ids); // 出錯時回傳原始 ID
     }
+}
+
+/**
+ * 處理自動新增標籤
+ * 如果提交的是字串而非 ID，則視為新標籤並存入資料庫
+ * @param PDO $conn
+ * @param string $categoryName
+ * @param string $valuesComma 逗號分隔的值 (可能是 ID 也可能是新標籤名稱)
+ * @param array $context 上下文 (lang)
+ * @return string 回傳轉換後的 ID 字串 (逗號分隔)
+ */
+function processAutoCreateTags($conn, $categoryName, $valuesComma, $context = [])
+{
+    if (empty($valuesComma)) return '';
+
+    $values = explode(',', $valuesComma);
+    $mapping = getCategoryMapping($categoryName);
+    $tableName = $mapping['table'];
+    $primaryKey = $mapping['pk'];
+    $titleCol = $mapping['title'];
+    $parentCol = $mapping['parent'];
+    $taxId = $mapping['taxId'];
+    $currentLang = $context['lang'] ?? $_GET['language'] ?? $_SESSION['editing_lang'] ?? DEFAULT_LANG_SLUG;
+
+    $resultIds = [];
+
+    foreach ($values as $val) {
+        $val = trim($val);
+        if ($val === '') continue;
+
+        // 如果是數字，視為現有 ID
+        if (is_numeric($val)) {
+            $resultIds[] = $val;
+            continue;
+        }
+
+        // 否則，檢查資料庫是否已存在同名標籤 (同一類型、同語系)
+        $where = "WHERE {$titleCol} = :name AND lang = :lang";
+        $params = [':name' => $val, ':lang' => $currentLang];
+
+        if ($tableName === 'taxonomies' && $taxId !== null) {
+            $where .= " AND taxonomy_type_id = :tax_id";
+            $params[':tax_id'] = $taxId;
+        } elseif ($mapping['table'] === 'data_set') {
+            // 如果是 data_set，可能還有 d_class1 限制 (通常 categoryName 就是 d_class1)
+            $where .= " AND d_class1 = :class1";
+            $params[':class1'] = $categoryName;
+        }
+        
+        $checkStmt = $conn->prepare("SELECT {$primaryKey} FROM {$tableName} {$where} LIMIT 1");
+        $checkStmt->execute($params);
+        $existingId = $checkStmt->fetchColumn();
+
+        if ($existingId) {
+            $resultIds[] = $existingId;
+        } else {
+            // 新增標籤
+            $fields = [
+                $titleCol => $val,
+                'lang' => $currentLang,
+            ];
+
+            if ($tableName === 'taxonomies') {
+                $fields['taxonomy_type_id'] = $taxId;
+                $fields['t_active'] = 1;
+                $fields['parent_id'] = null; // 修正先前 integrity error
+            } else {
+                $fields['d_class1'] = $categoryName;
+                $fields['d_active'] = 1;
+                $fields['d_date'] = date('Y-m-d H:i:s');
+            }
+
+            // 處理排序 (標籤排第一點 順序設為 1)
+            $sortCol = ($tableName === 'taxonomies') ? 'sort_order' : 'd_sort';
+            
+            // 建立排除標題條件的 WHERE 子句用於更新排序與查詢最新排序
+            $sortWhere = "WHERE lang = :lang";
+            $sortParams = [':lang' => $currentLang];
+            if ($tableName === 'taxonomies' && $taxId !== null) {
+                $sortWhere .= " AND taxonomy_type_id = :tax_id";
+                $sortParams[':tax_id'] = $taxId;
+            } elseif ($mapping['table'] === 'data_set') {
+                $sortWhere .= " AND d_class1 = :class1";
+                $sortParams[':class1'] = $categoryName;
+            }
+            
+            // 全部往後推一位 (用於標籤由最新排至最舊)
+            $updateSortStmt = $conn->prepare("UPDATE {$tableName} SET {$sortCol} = {$sortCol} + 1 {$sortWhere}");
+            $updateSortStmt->execute($sortParams);
+            
+            $fields[$sortCol] = 1;
+
+            $cols = implode(',', array_keys($fields));
+            $placeholders = ':' . implode(',:', array_keys($fields));
+            $insertSql = "INSERT INTO {$tableName} ({$cols}) VALUES ({$placeholders})";
+            
+            $insertStmt = $conn->prepare($insertSql);
+            $insertStmt->execute($fields);
+            $resultIds[] = $conn->lastInsertId();
+        }
+    }
+
+    return implode(',', $resultIds);
 }
 ?>

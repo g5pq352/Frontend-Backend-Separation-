@@ -11,6 +11,7 @@ $settingPage = [
         'title' => 'ttp_name',
         'sort' => 'sort_order',
         'active' => 'ttp_active',
+        'delete_time' => null,
     ],
     
     'listPage' => [
@@ -68,10 +69,6 @@ $settingPage = [
     ],
     
     'hiddenFields' => [],
-
-    'fileUpload' => [
-        'enabled' => false
-    ]
 ];
 
 return $settingPage;

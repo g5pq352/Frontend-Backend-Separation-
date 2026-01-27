@@ -14,21 +14,24 @@ var initializeDropzone = function() {
     var dId = $dropzoneEl.data('d-id');
     var fileType = $dropzoneEl.data('file-type');
 
-    console.log("初始化 Dropzone - ID:", dId, "Type:", fileType);
+    var maxSize = $dropzoneEl.data('max-size') || 2;
+
+    console.log("初始化 Dropzone - ID:", dId, "Type:", fileType, "MaxSize:", maxSize);
 
     // 2. 初始化 Dropzone
     $dropzoneEl.dropzone({
         url: 'upload_dropzone.php', // 對應你的後端檔案
         paramName: "file",          // 對應 PHP $_FILES['file']
-        maxFilesize: 512,           // 單位 MB
+        maxFilesize: maxSize,       // 單位 MB
         acceptedFiles: 'image/*',   // 限制檔案類型
         addRemoveLinks: true,       // 顯示刪除連結
         dictDefaultMessage: "",     // 隱藏預設文字 (因為你有自定義 span)
-        
+
         // 3. 關鍵：在發送前將 ID 和 Type 附加到 formData
         sending: function(file, xhr, formData) {
             formData.append("d_id", dId);
             formData.append("file_type", fileType);
+            formData.append("max_size", maxSize);
         },
 
         // 4. 上傳成功後的回調
@@ -50,27 +53,83 @@ var initializeDropzone = function() {
                 }
             } else {
                 console.error("上傳失敗:", response.message);
-                alert("上傳失敗: " + response.message);
-                this.removeFile(file); // 移除失敗的檔案預覽
+                
+                // 標記為錯誤並在圖片上顯示訊息
+                file.status = Dropzone.ERROR;
+                if (file.previewElement) {
+                    file.previewElement.classList.add("dz-error");
+                    var errorMsg = file.previewElement.querySelector(".dz-error-message");
+                    if (errorMsg) {
+                        errorMsg.textContent = response.message || "上傳失敗";
+                    }
+                }
+                // 不自動移除,讓使用者看到錯誤
             }
         },
-        
-        // 5. 錯誤處理
+
+        // 5. 錯誤處理（包含檔案大小超過限制）
         error: function(file, errorMessage) {
             console.error("Dropzone Error:", errorMessage);
             var msg = (typeof errorMessage === 'object' && errorMessage.message) ? errorMessage.message : errorMessage;
-            // 避免 alert 太多次，可視情況移除
-            // alert("系統錯誤: " + msg); 
+
+            // 在圖片預覽上顯示錯誤訊息
+            if (file.previewElement) {
+                var errorMsg = file.previewElement.querySelector(".dz-error-message");
+                if (errorMsg) {
+                    // 檢查是否為檔案大小超過限制的錯誤
+                    if (typeof errorMessage === 'string' && errorMessage.includes('File is too big')) {
+                        var fileSizeMB = (file.size / (1024 * 1024)).toFixed(2);
+                        errorMsg.textContent = "檔案過大 (" + fileSizeMB + "MB > " + maxSize + "MB)";
+                    } else {
+                        errorMsg.textContent = msg;
+                    }
+                }
+            }
+            
+            // 不自動移除,讓使用者看到錯誤並手動移除
+            // this.removeFile(file);
         },
 
         // 6. 初始化設定
         init: function() {
+            var dropzoneInstance = this;
+
+            // 【檔案大小檢查】在檔案加入佇列時立即檢查
+            this.on("addedfile", function(file) {
+                var fileSizeMB = file.size / (1024 * 1024);
+                
+                console.log("檢查檔案:", file.name, "大小:", fileSizeMB.toFixed(2) + "MB", "限制:", maxSize + "MB");
+                
+                if (fileSizeMB > maxSize) {
+                    // 標記為錯誤狀態
+                    file.status = Dropzone.ERROR;
+                    
+                    // 在圖片預覽上顯示錯誤訊息
+                    if (file.previewElement) {
+                        file.previewElement.classList.add("dz-error");
+                        
+                        // 建立錯誤訊息元素
+                        var errorMsg = file.previewElement.querySelector(".dz-error-message");
+                        if (errorMsg) {
+                            errorMsg.textContent = "檔案過大 (" + fileSizeMB.toFixed(2) + "MB > " + maxSize + "MB)";
+                        }
+                    }
+                    
+                    // 自動移除檔案 (可選,或讓使用者手動移除)
+                    // setTimeout(function() {
+                    //     dropzoneInstance.removeFile(file);
+                    // }, 3000);
+                    
+                    return false;
+                }
+            });
+
             // 這裡可以處理「編輯模式」下，預先顯示已上傳圖片的邏輯
             // 如果你的 $dropzoneEl 有 dz-filled class，可以在此撈取舊圖片顯示
             if( $dropzoneEl.hasClass('dz-filled') ) {
                 // TODO: 載入既有圖片的邏輯
             }
-            
+
             // 當佇列完成時 (例如一次上傳 5 張，全部傳完後)
             this.on("queuecomplete", function() {
                 console.log("所有檔案處理完畢");
