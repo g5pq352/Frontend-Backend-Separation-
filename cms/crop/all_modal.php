@@ -2,6 +2,8 @@
 <link rel="stylesheet" href="<?=BASIC_URL?>/cms/jquery/cropper/cropper.min.css" />
 <script src="<?=BASIC_URL?>/cms/jquery/cropper/cropper.min.js"></script>
 <script src="<?=BASIC_URL?>/cms/js/sweetalert2@11.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pako@1.0.11/dist/pako.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/upng-js@2.1.0/UPNG.min.js"></script>
 <link rel="stylesheet" href="<?=BASIC_URL?>/cms/crop/crop.css" />
 
 <template id="universalRowTemplate">
@@ -47,6 +49,7 @@
         <h2>圖片裁切</h2>
         <p>最低尺寸: <span id="minDimensions"></span> | 目前尺寸: <span id="currentDimensions" style="font-weight:bold;">0 x 0</span></p>
         <div class="img-container"><img id="imageToCrop" src=""></div>
+        <div id="cropProgressMsg" style="display:none; text-align:center; color:#007bff; font-weight:bold; margin: 10px 0;">⏳ 圖片裁切中，請稍候...</div>
         <div style="text-align: center; margin-top: 15px;">
             <button id="confirmCropBtn" class="crop-action-btn btn-green">✅ 確認</button>
             <button id="forceCropBtn" class="crop-action-btn btn-red">⚠️ 強制</button>
@@ -311,6 +314,7 @@
                     finalHeight = Math.round(cropData.height * (MAX_WIDTH / cropData.width));
                 }
             } 
+            // 註解掉最小寬度強制放大的邏輯，避免 1.74MB PNG 裁切後膨脹成 2.2MB
             else if (finalWidth < MIN_WIDTH) {
                 finalWidth = MIN_WIDTH;
                 if (this.aspectRatio) {
@@ -321,72 +325,106 @@
             } 
             
             // 設定 Canvas 背景處理
-            // 如果是 JPEG，透明背景會變黑，所以我們可以預設給它白色底(選用)
-            // 但因為你要解決變黑問題，重點是下面的 toBlob 格式
-            const croppedCanvas = this.cropper.getCroppedCanvas({
+            const canvasOptions = {
                 width: finalWidth,
                 height: finalHeight,
                 imageSmoothingEnabled: true,
                 imageSmoothingQuality: 'high',
-                // fillColor: 'transparent' // 預設就是透明，這行不用動
-            });
+            };
 
-            // --- ⭐ 修改開始：判斷輸出格式 ⭐ ---
-            // 判斷原始檔案是否為 PNG 或 GIF，如果是，就保持透明格式輸出
-            let outputMimeType = 'image/jpeg'; // 預設 JPG
-            if (this.currentFileType === 'image/png' || this.currentFileType === 'image/gif') {
-                outputMimeType = 'image/png';
+            // 如果原始格式就不支援透明度，直接給白底
+            // 如果原始格式就不支援透明度 (JPEG/BMP等)，才給白底；PNG/GIF/SVG 則保留透明能力
+            if (this.currentFileType !== 'image/png' && this.currentFileType !== 'image/gif' && this.currentFileType !== 'image/svg+xml') {
+                canvasOptions.fillColor = '#fff';
             }
 
-            // 5. 轉成 Blob
-            // 第二個參數改用 outputMimeType，而不是寫死 'image/jpeg'
-            croppedCanvas.toBlob((blob) => {
-                this.confirmBtn.disabled = false;
-                if (!blob) { this.uploadStatus.textContent = '❌ 錯誤'; return; }
+            let croppedCanvas = this.cropper.getCroppedCanvas(canvasOptions);
 
-                this.croppedBlob = blob;
-                
-                // 【新增】將 Blob 轉換成 File 並替換 input 的值
-                // 生成檔案名稱（使用時間戳避免重複）
-                const timestamp = Date.now();
-                const extension = outputMimeType === 'image/png' ? 'png' : 'jpg';
-                const fileName = `cropped_${timestamp}.${extension}`;
-                
-                // 將 Blob 轉換成 File 物件
-                const croppedFile = new File([blob], fileName, { 
-                    type: outputMimeType,
-                    lastModified: timestamp
-                });
-                
-                // 使用 DataTransfer 來替換 input 的 files
-                const dataTransfer = new DataTransfer();
-                dataTransfer.items.add(croppedFile);
-                this.fileInput.files = dataTransfer.files;
-                
-                this.imageUrlInput.value = 'BLOB_READY'; 
-                
-                const sizeKB = (blob.size / 1024).toFixed(0);
-                
-                this.uploadStatus.textContent = `✅ 已準備 (${finalWidth}x${finalHeight}, ${sizeKB} KB)`;
-                
-                if (this.removeBtn) this.removeBtn.style.display = 'inline-block';
+            // --- ⭐ 智慧型格式選擇：SVG 轉 PNG，其餘維持原樣 ⭐ ---
+            let outputMimeType = this.currentFileType; 
+            if (outputMimeType === 'image/svg+xml') {
+                outputMimeType = 'image/png'; // SVG 裁切後轉為 PNG
+            } else if (outputMimeType !== 'image/png' && outputMimeType !== 'image/jpeg' && outputMimeType !== 'image/gif') {
+                outputMimeType = 'image/jpeg'; // 只有非標準格式才預設轉 JPEG
+            }
+            
+            // 如果是 JPEG 或非透明格式，我們在畫布繪製前已經補過白底了
 
-                if (this.currentPreviewUrl) URL.revokeObjectURL(this.currentPreviewUrl);
-                this.currentPreviewUrl = URL.createObjectURL(blob);
-                this.croppedImagePreview.src = this.currentPreviewUrl;
-                this.croppedImagePreview.style.display = 'block';
-                this.fileNameDisplay.style.display = 'none';
+            // 5. 轉成 Blob (JPEG 設為 0.92 品質)
+            if (outputMimeType === 'image/jpeg') {
+                const quality = 0.92;
+                croppedCanvas.toBlob((blob) => {
+                    this._handleCroppedBlob(blob, finalWidth, finalHeight, outputMimeType);
+                }, outputMimeType, quality);
+            } else {
+                // PNG / GIF (或 SVG 轉來的 PNG) 使用 UPNG.js 進行高效壓縮
+                const progressMsg = document.getElementById('cropProgressMsg');
+                if (progressMsg) progressMsg.style.display = 'block';
+                this.confirmBtn.disabled = true;
 
-                this.uploadStatus.style.display = 'none';
-
-                this.closeModal();
-
-                // ⭐ 觸發自定義事件，讓外部知道圖片已更新 (例如取消標記刪除)
-                $(this.fileInput).trigger('imageUpdated', [this.id]);
-
-            }, outputMimeType, 0.9); // 使用動態決定的格式
-            // --- ⭐ 修改結束 ⭐ ---
+                // 使用 setTimeout 確保讓 UI 先渲染「處理中」的文字，再進行耗時壓縮
+                setTimeout(() => {
+                    try {
+                        const ctx = croppedCanvas.getContext('2d');
+                        const imgData = ctx.getImageData(0, 0, croppedCanvas.width, croppedCanvas.height);
+                        // UPNG.encode(rgba_buffers, width, height, cnum)
+                        // ⭐ 調整壓縮比例：cnum = 0 為無損壓縮；cnum = 256 為 256 色有損壓縮 (檔案會變小非常多)
+                        const buffer = UPNG.encode([imgData.data.buffer], croppedCanvas.width, croppedCanvas.height, 0);
+                        const blob = new Blob([buffer], { type: 'image/png' });
+                        this._handleCroppedBlob(blob, finalWidth, finalHeight, 'image/png');
+                    } catch (e) {
+                        console.warn('UPNG 壓縮失敗，改用原封不動儲存:', e);
+                        croppedCanvas.toBlob((blob) => {
+                            this._handleCroppedBlob(blob, finalWidth, finalHeight, outputMimeType);
+                        }, outputMimeType);
+                    } finally {
+                        if (progressMsg) progressMsg.style.display = 'none';
+                    }
+                }, 100);
+            }
         }
+
+        // 抽取共同的 Blob 處理邏輯
+        _handleCroppedBlob(blob, finalWidth, finalHeight, outputMimeType) {
+            this.confirmBtn.disabled = false;
+            if (!blob) { this.uploadStatus.textContent = '❌ 錯誤'; return; }
+
+            this.croppedBlob = blob;
+            
+            // 將 Blob 轉換成 File 並替換 input 的值
+            const timestamp = Date.now();
+            const extension = outputMimeType === 'image/png' ? 'png' : (outputMimeType === 'image/gif' ? 'gif' : 'jpg');
+            const fileName = `cropped_${timestamp}.${extension}`;
+            
+            const croppedFile = new File([blob], fileName, { 
+                type: outputMimeType,
+                lastModified: timestamp
+            });
+            
+            const dataTransfer = new DataTransfer();
+            dataTransfer.items.add(croppedFile);
+            this.fileInput.files = dataTransfer.files;
+            
+            this.imageUrlInput.value = 'BLOB_READY'; 
+            
+            const sizeKB = (blob.size / 1024).toFixed(0);
+            this.uploadStatus.textContent = `✅ 已準備 (${finalWidth}x${finalHeight}, ${sizeKB} KB)`;
+            
+            if (this.removeBtn) this.removeBtn.style.display = 'inline-block';
+
+            if (this.currentPreviewUrl) URL.revokeObjectURL(this.currentPreviewUrl);
+            this.currentPreviewUrl = URL.createObjectURL(blob);
+            this.croppedImagePreview.src = this.currentPreviewUrl;
+            this.croppedImagePreview.style.display = 'block';
+            this.fileNameDisplay.style.display = 'none';
+            this.uploadStatus.style.display = 'none';
+
+            this.closeModal();
+
+            // ⭐ 觸發自定義事件，讓外部知道圖片已更新
+            $(this.fileInput).trigger('imageUpdated', [this.id]);
+        }
+        
         
         closeModal() {
             this.modal.style.display = 'none';

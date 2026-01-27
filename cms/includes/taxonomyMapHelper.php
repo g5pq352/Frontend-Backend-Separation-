@@ -183,7 +183,7 @@ function reorderTaxonomyMap($conn, $taxonomyId, $mapLevel = null, $conditions = 
         $reorganizeConditions = [
             '`data_taxonomy_map`.t_id' => $taxonomyId,
             '`data_taxonomy_map`.d_top' => 0,
-            "(`ds`.d_delete_time IS NULL OR `ds`.d_delete_time = '0000-00-00 00:00:00')" => null
+            "`ds`.d_delete_time IS NULL" => null
         ];
 
         if ($mapLevel !== null) {

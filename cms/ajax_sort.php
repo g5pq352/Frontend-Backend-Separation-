@@ -188,7 +188,8 @@ try {
                 $checkCol = $conn->prepare("SHOW COLUMNS FROM {$tableName} LIKE ?");
                 $checkCol->execute([$col_delete_time]);
                 if ($checkCol->fetch()) {
-                    $baseConditions[] = "({$col_delete_time} IS NULL OR {$col_delete_time} = '0000-00-00 00:00:00')";
+                    // 【修正】僅檢查 IS NULL，移除對 '' 的判斷以避免 MySQL Strict Mode 報錯
+                    $baseConditions[] = "{$col_delete_time} IS NULL";
                 }
             } catch (Exception $e) {
                 // 欄位不存在，忽略

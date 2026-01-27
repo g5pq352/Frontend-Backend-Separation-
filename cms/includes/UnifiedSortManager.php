@@ -108,7 +108,7 @@ class UnifiedSortManager
                         $conditions[] = "ds.lang = " . $conn->quote($lang);
                     }
                     if ($isSoftDelete && $col_delete_time) {
-                        $conditions[] = "(ds.{$col_delete_time} IS NULL OR ds.{$col_delete_time} = '' OR ds.{$col_delete_time} = '0000-00-00 00:00:00')";
+                        $conditions[] = "ds.{$col_delete_time} IS NULL";
                     }
 
                     $whereClause = !empty($conditions) ? 'WHERE ' . implode(' AND ', $conditions) : '';
@@ -196,7 +196,7 @@ class UnifiedSortManager
             }
 
             if ($context['isSoftDelete'] && !empty($context['col_delete_time'])) {
-                $whereConditions[] = "({$context['col_delete_time']} IS NULL OR {$context['col_delete_time']} = '' OR {$context['col_delete_time']} = '0000-00-00 00:00:00')";
+                $whereConditions[] = "{$context['col_delete_time']} IS NULL";
             }
 
             $whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
@@ -261,7 +261,7 @@ class UnifiedSortManager
                 'dtm.t_id = :t_id',
                 'dtm.map_level = :map_level',
                 '(dtm.d_top = 0 OR dtm.d_top IS NULL)',
-                "(ds.d_delete_time IS NULL OR ds.d_delete_time = '' OR ds.d_delete_time = '0000-00-00 00:00:00')"
+                "ds.d_delete_time IS NULL"
             ];
             $params = [':t_id' => $taxonomyId, ':map_level' => $mapLevel];
 
