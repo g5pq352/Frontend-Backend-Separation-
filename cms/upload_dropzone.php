@@ -9,7 +9,6 @@ header('Content-Type: application/json; charset=utf-8');
 try {
     require_once '../Connections/connect2data.php';
     require_once 'upload_process.php';
-    require_once 'imagesSize.php';
     
     session_start();
 

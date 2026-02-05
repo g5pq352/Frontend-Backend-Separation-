@@ -572,9 +572,10 @@
 }
 .detail-item .detail-icon {
   font-size: 2.5rem;
-  margin-bottom: 5px;
+  margin-bottom: 10px;
   display: block;
   text-decoration: none;
+  line-height: 1;
 }
 .detail-item .detail-thumb {
   width: 100%;

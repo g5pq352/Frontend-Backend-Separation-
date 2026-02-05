@@ -143,31 +143,73 @@ try {
                 }
             }
 
-            // 分類與排序處理
+            // 分類與排序處理（支援多層分類）
             $hasCategory = $moduleConfig['listPage']['hasCategory'] ?? false;
             $categoryField = $moduleConfig['listPage']['categoryField'] ?? '';
             $categoryName = $moduleConfig['listPage']['categoryName'] ?? '';
             
-            if ($hasCategory && $categoryField && !empty($rowData[$categoryField]) && $categoryName) {
-                $oldCatId = $rowData[$categoryField];
+            if ($hasCategory && $categoryField && $categoryName) {
                 $catConfigFile = __DIR__ . "/set/{$categoryName}Set.php";
                 if (file_exists($catConfigFile)) {
                     $catConfig = require $catConfigFile;
                     $cTable = $catConfig['tableName'] ?? '';
                     $cPK = $catConfig['primaryKey'] ?? '';
                     $cTitleCol = $catConfig['cols']['title'] ?? ($cTable == 'taxonomies' ? 't_name' : 'd_title');
+                    
                     if ($cTable && $cPK && $cTitleCol) {
-                        $oldCatSql = "SELECT {$cTitleCol} FROM {$cTable} WHERE {$cPK} = :id";
-                        $oldCatStmt = $conn->prepare($oldCatSql);
-                        $oldCatStmt->execute([':id' => $oldCatId]);
-                        $oldCatTitle = $oldCatStmt->fetchColumn();
-                        if ($oldCatTitle) {
-                            $newCatSql = "SELECT {$cPK} FROM {$cTable} WHERE {$cTitleCol} = :title AND lang = :lang LIMIT 1";
-                            $newCatStmt = $conn->prepare($newCatSql);
-                            $newCatStmt->execute([':title' => $oldCatTitle, ':lang' => $targetLang]);
-                            $newCatId = $newCatStmt->fetchColumn();
-                            if ($newCatId) $rowData[$categoryField] = $newCatId;
-                            else $rowData[$categoryField] = 0;
+                        // 檢查 categoryField 是否為陣列（多層分類）
+                        if (is_array($categoryField)) {
+                            // 處理多層分類：遍歷每個層級欄位
+                            foreach ($categoryField as $field) {
+                                if (!empty($rowData[$field])) {
+                                    $oldCatId = $rowData[$field];
+                                    
+                                    $oldCatSql = "SELECT {$cTitleCol} FROM {$cTable} WHERE {$cPK} = :id";
+                                    $oldCatStmt = $conn->prepare($oldCatSql);
+                                    $oldCatStmt->execute([':id' => $oldCatId]);
+                                    $oldCatTitle = $oldCatStmt->fetchColumn();
+                                    
+                                    if ($oldCatTitle) {
+                                        $newCatSql = "SELECT {$cPK} FROM {$cTable} WHERE {$cTitleCol} = :title AND lang = :lang LIMIT 1";
+                                        $newCatStmt = $conn->prepare($newCatSql);
+                                        $newCatStmt->execute([':title' => $oldCatTitle, ':lang' => $targetLang]);
+                                        $newCatId = $newCatStmt->fetchColumn();
+                                        
+                                        if ($newCatId) {
+                                            $rowData[$field] = $newCatId;
+                                        } else {
+                                            $rowData[$field] = 0;
+                                        }
+                                    } else {
+                                        $rowData[$field] = 0;
+                                    }
+                                }
+                            }
+                        } else {
+                            // 處理單一分類欄位（向後兼容）
+                            if (!empty($rowData[$categoryField])) {
+                                $oldCatId = $rowData[$categoryField];
+                                
+                                $oldCatSql = "SELECT {$cTitleCol} FROM {$cTable} WHERE {$cPK} = :id";
+                                $oldCatStmt = $conn->prepare($oldCatSql);
+                                $oldCatStmt->execute([':id' => $oldCatId]);
+                                $oldCatTitle = $oldCatStmt->fetchColumn();
+                                
+                                if ($oldCatTitle) {
+                                    $newCatSql = "SELECT {$cPK} FROM {$cTable} WHERE {$cTitleCol} = :title AND lang = :lang LIMIT 1";
+                                    $newCatStmt = $conn->prepare($newCatSql);
+                                    $newCatStmt->execute([':title' => $oldCatTitle, ':lang' => $targetLang]);
+                                    $newCatId = $newCatStmt->fetchColumn();
+                                    
+                                    if ($newCatId) {
+                                        $rowData[$categoryField] = $newCatId;
+                                    } else {
+                                        $rowData[$categoryField] = 0;
+                                    }
+                                } else {
+                                    $rowData[$categoryField] = 0;
+                                }
+                            }
                         }
                     }
                 }

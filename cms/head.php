@@ -1,7 +1,7 @@
-<base href="<?=$backend_url.'/'?>" />
+<base href="<?=APP_BACKEND_PATH.'/'?>" />
 <script>
     // 定義系統 API 基礎路徑 (由 config.php 提供)
-    const API_BASE = '<?= $frontend_url ?>';
+    const API_BASE = '<?= APP_FRONTEND_PATH ?>';
 </script>
 
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />

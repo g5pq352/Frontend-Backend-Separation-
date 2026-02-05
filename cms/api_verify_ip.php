@@ -34,13 +34,11 @@ if ($data['secret'] !== $expectedSecret) {
     exit;
 }
 
-// 驗證 IP（測試環境允許所有 localhost IP）
-$allowedIPs = [
-    '127.0.0.1',
-    '::1',
-    'localhost',
-    '59.126.31.214'
-];
+// 引入配置檔案以使用統一的 IP 白名單
+require_once __DIR__ . '/../config/config.php';
+
+// 驗證 IP（使用統一配置的 IP 白名單）
+$allowedIPs = ALLOWED_IPS;
 
 $clientIP = $data['ip'];
 $isAllowed = in_array($clientIP, $allowedIPs);

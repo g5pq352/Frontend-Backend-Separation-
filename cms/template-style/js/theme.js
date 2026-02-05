@@ -676,6 +676,7 @@ window.theme.fn = {
 	};
 
 	PluginDatePicker.defaults = {
+		format: 'yyyy-mm-dd'
 	};
 
 	PluginDatePicker.prototype = {

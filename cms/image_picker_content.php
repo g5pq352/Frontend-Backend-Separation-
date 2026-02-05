@@ -118,8 +118,8 @@ if (!isset($currentFolderId)) {
         $relParts   = explode('/', $fileRel);
         $urlRelPath = implode('/', array_map('rawurlencode', $relParts));
 
-        $thumbUrl = $base_gallery_url . $frontend_url . '/uploads/thumbs/' . $urlRelPath;
-        $fullUrl  = $base_gallery_url . $frontend_url . '/uploads/' . $urlRelPath;
+        $thumbUrl = $base_gallery_url . APP_FRONTEND_PATH . '/uploads/thumbs/' . $urlRelPath;
+        $fullUrl  = $base_gallery_url . APP_FRONTEND_PATH . '/uploads/' . $urlRelPath;
 
         // 【關鍵修改】查詢圖片的資料庫 ID
         require_once __DIR__ . '/cms_media_helper.php';

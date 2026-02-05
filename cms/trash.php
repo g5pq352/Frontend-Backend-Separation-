@@ -240,7 +240,7 @@ if ($viewMode === 'list') {
 
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fancyapps/ui/dist/fancybox.css" />
     <script src="https://cdn.jsdelivr.net/npm/@fancyapps/ui/dist/fancybox.umd.js"></script>
-    <link rel="stylesheet" href="<?= $backend_url ?>/gallery/style/style.css">
+    <link rel="stylesheet" href="<?= APP_BACKEND_PATH ?>/gallery/style/style.css">
 </head>
 <body class="page-trash">
     <section class="body">
@@ -289,7 +289,7 @@ if ($viewMode === 'list') {
                                             $origDir  = ($origPath === '位置資訊遺失') ? '❓' : ($info['dirname'] ?? '');
                                             $origFile = ($origPath === '位置資訊遺失') ? $origName : ($info['basename'] ?? '');
 
-                                            $fullUrl = $base_gallery_url . $frontend_url . "/uploads/_trash/images/$id.$ext";
+                                            $fullUrl = $base_gallery_url . APP_FRONTEND_PATH . "/uploads/_trash/images/$id.$ext";
                                             $thumbPathCheck = __DIR__ . "/uploads/_trash/thumbs/$id.$ext"; 
                                             $showSrc = file_exists($thumbPathCheck) 
                                                 ? "uploads/_trash/thumbs/$id.$ext" 
@@ -298,7 +298,7 @@ if ($viewMode === 'list') {
                                             <div class="img-card">
                                                 <input type="checkbox" class="trash-check" value="<?= $id ?>">
                                                 <a href="<?= htmlspecialchars($fullUrl) ?>" data-fancybox="trash-single-gallery" data-caption="<?= htmlspecialchars($origName) ?>">
-                                                    <img src="<?= htmlspecialchars($base_gallery_url . $frontend_url . '/' . $showSrc) ?>" loading="lazy">
+                                                    <img src="<?= htmlspecialchars($base_gallery_url . APP_FRONTEND_PATH . '/' . $showSrc) ?>" loading="lazy">
                                                 </a>
                                                 <div class="img-name">
                                                     原始位置：<?= htmlspecialchars($origDir) ?>/<b><?= htmlspecialchars($origFile) ?></b>
@@ -338,7 +338,7 @@ if ($viewMode === 'list') {
                                                 <div class="folder-preview">
                                                     <?php if ($totalImgCount > 0) : ?>
                                                         <?php foreach ($previewImgs as $src) : ?>
-                                                            <img src="<?= htmlspecialchars($base_gallery_url . $frontend_url . '/' . $src) ?>">
+                                                            <img src="<?= htmlspecialchars($base_gallery_url . APP_FRONTEND_PATH . '/' . $src) ?>">
                                                         <?php endforeach; ?>
                                                     <?php else : ?>
                                                         <span class="no-img">無圖片</span>
@@ -401,7 +401,7 @@ if ($viewMode === 'list') {
                                             $ext = strtolower(pathinfo($item['name'], PATHINFO_EXTENSION));
                                             $isImage = is_image_ext($ext);
                                         ?>
-                                            <a href="<?= htmlspecialchars($base_gallery_url . $frontend_url . '/' . $item['full_url']) ?>" 
+                                            <a href="<?= htmlspecialchars($base_gallery_url . APP_FRONTEND_PATH . '/' . $item['full_url']) ?>" 
                                                <?php if ($isImage) : ?> 
                                                    data-fancybox="trash-folder-gallery" 
                                                    data-caption="<?= htmlspecialchars($item['name']) ?>" 
@@ -411,7 +411,7 @@ if ($viewMode === 'list') {
                                                class="card-link <?= $isImage ? 'is-image' : 'is-file' ?>">
 
                                                 <?php if ($isImage) : ?>
-                                                    <img src="<?= htmlspecialchars($base_gallery_url . $frontend_url . '/' . $item['thumb_url']) ?>" class="detail-thumb" loading="lazy">
+                                                    <img src="<?= htmlspecialchars($base_gallery_url . APP_FRONTEND_PATH . '/' . $item['thumb_url']) ?>" class="detail-thumb" loading="lazy">
                                                 <?php else : ?>
                                                     <span class="detail-icon">📄</span>
                                                 <?php endif; ?>
@@ -436,4 +436,4 @@ if ($viewMode === 'list') {
 </body>
 </html>
 
-<script src="<?= $backend_url ?>/gallery/js/app.js"></script>
+<script src="<?= APP_BACKEND_PATH ?>/gallery/js/app.js"></script>

@@ -8,7 +8,7 @@
 			}
 			CKEDITOR.replace(el.id, {
 			    height: '350px',
-				contentsCss: '<?=$backend_url?>/css/layout.css',
+				contentsCss: '<?=APP_BACKEND_PATH?>/css/layout.css',
 			    ignoreReadOnlyWarning: true,
 			    // 貼上時移除外部樣式
 			    pasteFromWordRemoveFontStyles: true,

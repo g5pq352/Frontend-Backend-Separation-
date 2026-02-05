@@ -47,8 +47,8 @@ try {
     $mail->SingleTo = true;
 
     // 設定寄件/收件資訊
-    $mail->SetFrom('maysuregun@gmail.com', '公司');
-    $mail->AddReplyTo('maysuregun@gmail.com', '公司');
+    $mail->SetFrom(SMTP_SET_FROM, '公司');
+    $mail->AddReplyTo(SMTP_REPLY_TO, '公司');
     $mail->AddAddress($toEmail, $toName);
     $mail->Subject = "公司客服回覆 - " . $reply_subject;
 

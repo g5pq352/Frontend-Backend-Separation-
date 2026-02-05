@@ -13,9 +13,9 @@ if (!isset($currentFolderId)) {
     $currentFolderId = null;
 }
 
-// 3. 確保 $backend_url 存在 (從 config.php 引入)
-if (!isset($backend_url)) {
-    $backend_url = "/cms";
+// 3. 確保 APP_BACKEND_PATH 存在 (從 config.php 引入)
+if (!defined('APP_BACKEND_PATH')) {
+    define('APP_BACKEND_PATH', "/cms");
 }
 ?>
 
@@ -79,7 +79,7 @@ if (!isset($backend_url)) {
     </div>
 </div>
 
-<form class="new-sub-folder-form" action="<?= $backend_url ?>/gallery/add_folder.php" method="post">
+<form class="new-sub-folder-form" action="<?= APP_BACKEND_PATH ?>/gallery/add_folder.php" method="post">
     <input type="text" name="folder_name" placeholder="在此新增子資料夾" required>
 
     <input type="hidden" name="parent_path" value="<?= htmlspecialchars($currentPath, ENT_QUOTES) ?>">
@@ -137,7 +137,7 @@ if (!isset($backend_url)) {
 
             // 縮圖與原圖路徑
             $bgUrl = $base_gallery_url ?? '';
-            $feUrl = $frontend_url ?? '';
+            $feUrl = APP_FRONTEND_PATH;
 
             $thumbUrl = $bgUrl . $feUrl . '/uploads/thumbs/' . $urlRelPath;
             $fullUrl  = $bgUrl . $feUrl . '/uploads/' . $urlRelPath;

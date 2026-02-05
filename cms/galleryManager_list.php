@@ -210,7 +210,7 @@ $tree = buildTree($baseDir, '');
     <?php require_once('head.php'); ?>
     <?php require_once('script.php'); ?>
 
-    <link rel="stylesheet" href="<?= $backend_url ?>/gallery/style/style.css">
+    <link rel="stylesheet" href="<?= APP_BACKEND_PATH ?>/gallery/style/style.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fancyapps/ui@5.0/dist/fancybox/fancybox.css" />
     <script src="https://cdn.jsdelivr.net/npm/@fancyapps/ui@5.0/dist/fancybox/fancybox.umd.js"></script>
@@ -259,7 +259,7 @@ $tree = buildTree($baseDir, '');
 
 <script>
     // 關鍵修正：使用實際訪問的 URL 路徑，而不是實體檔案路徑
-    window.AJAX_SCRIPT = '<?= $_SERVER['REQUEST_URI'] ? strtok($_SERVER['REQUEST_URI'], '?') : $backend_url . '/galleryManager_list.php' ?>';
+    window.AJAX_SCRIPT = '<?= $_SERVER['REQUEST_URI'] ? strtok($_SERVER['REQUEST_URI'], '?') : APP_BACKEND_PATH . '/galleryManager_list.php' ?>';
     window.currentPath = '<?= htmlspecialchars($currentPath, ENT_QUOTES) ?>';
     // 輸出 ID
     window.currentFolderId = <?= json_encode($currentFolderId) ?>;
@@ -273,5 +273,5 @@ $tree = buildTree($baseDir, '');
     window.PHP_UPLOAD_LIMIT = "<?= ini_get('upload_max_filesize') ?>";
     window.PHP_POST_LIMIT = "<?= ini_get('post_max_size') ?>";
 </script>
-<script src="<?= $backend_url ?>/gallery/js/app.js"></script>
-<script src="<?= $backend_url ?>/gallery/js/upload.js"></script>
+<script src="<?= APP_BACKEND_PATH ?>/gallery/js/app.js"></script>
+<script src="<?= APP_BACKEND_PATH ?>/gallery/js/upload.js"></script>

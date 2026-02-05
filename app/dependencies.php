@@ -10,6 +10,9 @@ use function DI\autowire;
 # 先在全域載入連線定義，確保 $conn 與 $DB 進入全域範圍
 require_once 'Connections/connect2data.php';
 
+# 載入全域 Helper Functions
+require_once __DIR__ . '/Helpers/helpers.php';
+
 # 1. 資料庫連線 (Database Connection)
 $container->set(\DB::class, function() {
     global $DB;

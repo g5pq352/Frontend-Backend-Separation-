@@ -26,7 +26,7 @@ require_once(__DIR__ . '/includes/categoryHelper.php');
 
         <span class="separator"></span>
 
-        <div class="" style="display: inline-block;">
+        <div class="userbox">
             <div class="">
                 <a href="../" target="_blank">
                     觀看首頁 
@@ -75,9 +75,11 @@ require_once(__DIR__ . '/includes/categoryHelper.php');
             <div class="dropdown-menu">
                 <ul class="list-unstyled mb-2">
                     <li class="divider"></li>
-                    <li>
-                        <a role="menuitem" tabindex="-1" href="<?=PORTAL_AUTH_URL?>tpl=languageType/list"><i class="bx bx-text"></i>語系列表</a>
-                    </li>
+                    <?php if(isset($_SESSION['MM_UserGroupId']) && $_SESSION['MM_UserGroupId'] == 999){ ?>
+                        <li>
+                            <a role="menuitem" tabindex="-1" href="<?=PORTAL_AUTH_URL?>tpl=languageType/list"><i class="bx bx-text"></i>語系列表</a>
+                        </li>
+                    <?php } ?>
                     <li>
                         <a role="menuitem" tabindex="-1" href="<?php echo $logoutAction ?>"><i class="bx bx-power-off"></i>Logout</a>
                     </li>

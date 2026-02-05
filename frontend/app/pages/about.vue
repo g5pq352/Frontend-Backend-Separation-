@@ -6,8 +6,10 @@ useSeoMeta({
 </script>
 
 <template>
-    <div>
-        <h1>關於我們</h1>
-        <p>這是公司簡介...</p>
-    </div>
+    <main class="main-content">
+        <div>
+            <h1>關於我們</h1>
+            <p>這是公司簡介...</p>
+        </div>
+    </main>
 </template>

@@ -281,8 +281,16 @@ function renderCategorySelect($categoryName, $fieldName, $selectedValue = null, 
     $tabindexAttr = $multiple ? 'tabindex="4"' : '';
     $requiredAttr = ($options['required'] ?? false) ? 'required' : '';
     $canCreateAttr = ($options['canCreate'] ?? false) ? 'data-can-create="true" data-tags="true"' : '';
+    
+    // 【新增】是否顯示「請選擇」空選項（預設為 true）
+    $showPlaceholder = $options['showPlaceholder'] ?? false;
 
     $html = "<select name=\"{$nameAttr}\" id=\"{$fieldName}\" class=\"{$class}\" data-plugin-selectTwo {$multipleAttr} {$dataPlaceholder} {$styleAttr} {$tabindexAttr} {$requiredAttr} {$canCreateAttr}>";
+    
+    // 如果不是多選且需要顯示空選項，則添加「請選擇」
+    if (!$multiple && $showPlaceholder) {
+        $html .= "<option value=\"\">-- 請選擇 --</option>";
+    }
     
     foreach ($categories as $cat) {
         if ($multiple) {
@@ -404,6 +412,65 @@ function getCategoryPath($categoryName, $targetId)
     }
 
     return $path;
+}
+
+/**
+ * 取得分類的全路徑名稱字串 (例如: "分類1 > 子分類2")
+ * @param string $categoryName 分類名稱
+ * @param int $targetId 目標 ID
+ * @param string $separator 分隔符號
+ * @return string
+ */
+function getCategoryPathNames($categoryName, $targetId, $separator = ' > ')
+{
+    $pathIds = getCategoryPath($categoryName, $targetId);
+    if (empty($pathIds)) return '-';
+    
+    $pathNames = [];
+    foreach ($pathIds as $id) {
+        $name = getCategoryNamesByIds($categoryName, $id);
+        if ($name) $pathNames[] = $name;
+    }
+    
+    return implode($separator, $pathNames);
+}
+
+/**
+ * 取得分類的全路徑 HTML (麵包屑風格，可點擊跳轉)
+ * @param string $categoryName 分類名稱
+ * @param int $targetId 目標 ID
+ * @param string $module 當前模組 slug (選填)
+ * @param string $separator 分隔符號 (HTML)
+ * @return string
+ */
+function getCategoryPathHtml($categoryName, $targetId, $module = null, $separator = ' <i class="fas fa-chevron-right mx-1 text-muted" style="font-size: 0.8em;"></i> ')
+{
+    global $conn;
+    $pathIds = getCategoryPath($categoryName, $targetId);
+    if (empty($pathIds)) return '<span class="text-muted">-</span>';
+    
+    // 如果沒給 module，嘗試從 cms_menus 找
+    if (!$module) {
+        $stmt = $conn->prepare("SELECT menu_id FROM cms_menus WHERE menu_type = :name OR menu_id = :name LIMIT 1");
+        $stmt->execute([':name' => $categoryName]);
+        $moduleTemp = $stmt->fetchColumn();
+        $module = $moduleTemp ?: $categoryName;
+    }
+
+    $baseUrl = defined('PORTAL_AUTH_URL') ? PORTAL_AUTH_URL : '';
+    $htmlArr = [];
+    $accumulatedParams = [];
+    
+    foreach ($pathIds as $index => $pid) {
+        $name = getCategoryNamesByIds($categoryName, $pid);
+        $level = $index + 1;
+        $accumulatedParams[] = "selected{$level}=" . $pid;
+        
+        $url = $baseUrl . "tpl={$module}/list?" . implode('&', $accumulatedParams);
+        $htmlArr[] = "<a href=\"{$url}\" class=\"text-dark text-decoration-none\" style=\"font-size: 0.9em; border-bottom: 1px dashed #ccc;\" onmouseover=\"this.style.borderBottomStyle='solid'\" onmouseout=\"this.style.borderBottomStyle='dashed'\">{$name}</a>";
+    }
+    
+    return implode($separator, $htmlArr);
 }
 
 /**

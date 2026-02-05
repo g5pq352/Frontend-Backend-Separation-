@@ -1,4 +1,6 @@
 <?php
+$hasHierarchy = true;  // 開放多階層分類
+
 $menu_is = "hostCate";
 $settingPage = [
     'module' => $menu_is,
@@ -22,18 +24,35 @@ $settingPage = [
     
     'listPage' => [
         'title' => '分類列表',
-        'itemsPerPage' => 9999999,
-        'hasCategory' => false,
-        'hasHierarchy' => true,
+        'imageFileType' => 'productCateCover',
+        // ----------------------------------------------------------
+        'hasCategory'       => false,
+        'hasHierarchy'      => $hasHierarchy,
+        'skipRelationCheck' => true,
+        // ----------------------------------------------------------
         'columns' => [
             ['field' => 'sort_order', 'label' => '排序', 'type' => 'sort', 'width' => '74'],
             ['field' => 'created_at', 'label' => '建立日期', 'type' => 'date', 'width' => '142'],
             ['field' => 't_name', 'label' => '分類名稱', 'type' => 'text', 'width' => '400'],
-            ['field' => 'next_level', 'label' => '下一層', 'type' => 'button', 'width' => '60'],
+            ...($hasHierarchy ? [
+                ['field' => 'next_level', 'label' => '下一層', 'type' => 'button', 'width' => '60']
+            ] : []),
+            // ['field' => 'image', 'label' => '圖片', 'type' => 'image', 'width' => '140'],
             ['field' => 't_active', 'label' => '狀態', 'type' => 'active', 'width' => '60'],
             ['field' => 'edit', 'label' => '編輯', 'type' => 'button', 'width' => '30'],
-            ['field' => 'delete', 'label' => '刪除', 'type' => 'button', 'width' => '30']
+            ['field' => 'delete', 'label' => '刪除', 'type' => 'button', 'width' => '30'],
+
+            // 【標準】標準複選分類顯示方式 (從資料庫抓取名稱)
+            // ['field' => 't_tag', 'label' => '自定義複選', 'type' => 'select', 'width' => '120',
+            //     'options' => [
+            //         ['value' => 1, 'label' => '汪汪'],
+            //         ['value' => 5, 'label' => '喵喵'],
+            //         ['value' => 8, 'label' => '嗚嗚']
+            //     ]
+            // ],
+            // ['field' => 't_tag', 'label' => '系統分類', 'type' => 'category', 'category' => "newsC", 'width' => '150'],
         ],
+        'itemsPerPage'      => 9999999,
         'orderBy' => 'sort_order ASC, created_at DESC'
     ],
     

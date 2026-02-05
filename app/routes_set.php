@@ -101,6 +101,9 @@ $app->group('/api', function ($group) {
     // Portfolio api
     $group->get('/portfolio-list', [\App\Controllers\PortfolioController::class, 'getPortfolioList']);
     $group->get('/portfolio-detail/{slug}', [\App\Controllers\PortfolioController::class, 'getPortfolioDetail']);
+
+    // Module api
+    $group->get('/module-list', [\App\Controllers\ModuleController::class, 'index']);
 })->add(new \App\Middleware\ApiAuthMiddleware());
 
 # 4.1 IP 限制與密碼驗證 API (Public - 不需要 API Token)

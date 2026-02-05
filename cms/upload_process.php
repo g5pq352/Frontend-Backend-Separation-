@@ -71,7 +71,7 @@ function image_process(PDO $pdo, $FILES_A, $file_title, $file_name, $deal_type, 
 
                 // 先增加計數器，確保每個檔案都有唯一的編號
                 $successCount++;
-                $photo_name = md5($file_name . $new_pic_num + $successCount . time() . $j);
+                $photo_name = md5($file_name . $new_pic_num + $successCount . microtime() . $j . uniqid());
                 $FILES_A['name'][$j] = str_replace(" ", "", $FILES_A['name'][$j]);
 
                 $size = @getimagesize($FILES_A['tmp_name'][$j]);

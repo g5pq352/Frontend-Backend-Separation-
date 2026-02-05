@@ -180,7 +180,8 @@ function renderSelect($config, $value = '')
                     'imageConfig' => $imageConfig,
                     'includeRoot' => $config['includeRoot'] ?? ($field === 'parent_id' || $field === 'menu_parent_id'),
                     'required' => $required,
-                    'canCreate' => $config['canCreate'] ?? false
+                    'canCreate' => $config['canCreate'] ?? false,
+                    'showPlaceholder' => $config['showPlaceholder'] ?? false
                 ]);
             }
             elseif (isset($config['options'])) {
@@ -392,7 +393,7 @@ function renderLinkedSelect($config, $value = '')
  * @param string $value 欄位值
  * @return string HTML 字串
  */
-function renderDateField($config, $value = '')
+function renderDateTimeField($config, $value = '')
 {
     $field = $config['field'];
     $label = $config['label'];
@@ -411,6 +412,38 @@ function renderDateField($config, $value = '')
     $html .= "<i class=\"fas fa-calendar-alt\"></i>";
     $html .= "</span>";
     $html .= "<input name=\"{$field}\" type=\"text\" class=\"form-control\" id=\"{$field}\" value=\"{$value}\" size=\"{$size}\" {$readonly} />";
+    $html .= "</div>";
+    $html .= "</div>";
+    $html .= "</div>";
+    
+    return $html;
+}
+
+/**
+ * 渲染日期欄位
+ * @param array $config 欄位配置
+ * @param string $value 欄位值
+ * @return string HTML 字串
+ */
+function renderDateField($config, $value = '')
+{
+    $field = $config['field'];
+    $label = $config['label'];
+    $readonly = $config['readonly'] ?? false;
+    $size = $config['size'] ?? 50;
+    
+    if (empty($value) || $value == '0000-00-00') {
+        $value = date('Y-m-d');
+    }
+    
+    $html = "<div class='form-group row pb-3'>";
+    $html .= "<label class=\"col-lg-2 control-label text-lg-end pt-2\">{$label}</label>";
+    $html .= "<div class=\"col-lg-7\">";
+    $html .= "<div class=\"input-group\">";
+    $html .= "<span class=\"input-group-text\">";
+    $html .= "<i class=\"fas fa-calendar-alt\"></i>";
+    $html .= "</span>";
+    $html .= "<input name=\"{$field}\" type=\"text\" data-plugin-datepicker data-plugin-options='{\"format\": \"yyyy-mm-dd\"}' class=\"form-control\" id=\"{$field}\" value=\"{$value}\" size=\"{$size}\" {$readonly} />";
     $html .= "</div>";
     $html .= "</div>";
     $html .= "</div>";
@@ -528,7 +561,8 @@ function renderImageUpload($config, $existingImages = [])
 
     // 新增按鈕
     // 當 multiple=true 且 dropzone=true 時，編輯模式下不顯示新增按鈕（因為有 dropzone）
-    if ($allowMultiple && !($useDropzone && $isEditMode)) {
+    // if ($allowMultiple && !($useDropzone && $isEditMode)) {
+    if ($allowMultiple) {
         $html .= "<div style='margin-top:20px;'>";
         $html .= "  <a href=\"javascript:void(0)\" onclick=\"addDynamicField('draggable_{$field}', '{$field}', '{$targetFileType}')\" class='table_data' style='text-decoration:none;'>";
         $html .= "    <img src=\"image/add.png\" width=\"16\" height=\"16\" border=\"0\" style='vertical-align:middle;'> 新增圖片";
@@ -585,7 +619,7 @@ function renderImageUpload($config, $existingImages = [])
         $html .= "<div class='col-lg-9'>";
         $maxSize = $config['maxSize'] ?? $config['size']['maxSize'] ?? (defined('DEFAULT_MAX_IMG_SIZE') ? DEFAULT_MAX_IMG_SIZE : 2);
         $postMaxSize = defined('DEFAULT_POST_MAX_SIZE') ? DEFAULT_POST_MAX_SIZE : 8;
-        $html .= "<div id='dropzone-form-image' class='dropzone-modern dz-square' data-d-id='{$d_id}' data-file-type='{$targetFileType}' data-max-size='{$maxSize}'>";
+        $html .= "<div id='dropzone-{$field}' class='dropzone-modern dz-square' data-d-id='{$d_id}' data-file-type='{$targetFileType}' data-max-size='{$maxSize}'>";
         $html .= "<span class='dropzone-upload-message text-center'>";
         $html .= "<i class='bx bxs-cloud-upload'></i>";
         $html .= "<b class='text-color-primary'>Drag/Upload</b> your image here.";
@@ -659,7 +693,7 @@ function renderFileUpload($config, $existingFiles = [])
     // - 如果有現有檔案且是 multiple 模式：不顯示（透過新增按鈕來新增）
     // - 如果有現有檔案且不是 multiple 模式：不顯示
     if (!$hasFiles) {
-        $html .= "    <div class='file-input-container' id='container_{$field}'>";
+        $html .= "    <div class='file-input-container mb-3' id='container_{$field}'>";
         $html .= "      <div class='file-input-row mb-2 d-flex align-items-center'>";
         $html .= "        <input type='file' name='{$field}[]' class='form-control me-2 file-input' accept='{$acceptFormat}'>";
         $html .= "        <input type='text' name='{$field}_title[]' class='form-control me-2' style='width: 200px;' placeholder='檔案說明'>";
@@ -673,7 +707,7 @@ function renderFileUpload($config, $existingFiles = [])
 
     // 只在 multiple 模式下顯示新增按鈕
     if ($allowMultiple) {
-        $html .= "    <button type='button' class='btn btn-default btn-sm mt-1 add-file-row' data-target='container_{$field}'><i class='fas fa-plus me-1'></i> 新增檔案</button>";
+        $html .= "    <button type='button' class='btn btn-default btn-sm mt-1 add-file-row' data-target='container_{$field}'><i class='fas fa-plus me-1'></i> 新增檔案</button><br>";
     }
 
     // --- ⭐ 自動生成提示文字 (支援格式 + 大小限制) ⭐ ---
@@ -695,7 +729,7 @@ function renderFileUpload($config, $existingFiles = [])
     $finalNote = trim($autoNote . ($autoNote && $userNote ? " <br>" : "") . $userNote);
 
     if ($finalNote) {
-        $html .= "<br><label class=\"error mt-2\">{$finalNote}</label>";
+        $html .= "<label class=\"error mt-2\">{$finalNote}</label>";
     }
     $html .= "  </div>";
 
@@ -1201,8 +1235,9 @@ function renderFormField($config, $value = '', $existingData = [])
         case 'linked_select':
             return renderLinkedSelect($config, $value);
         case 'date':
-        case 'datetime':
             return renderDateField($config, $value);
+        case 'datetime':
+            return renderDateTimeField($config, $value);
         case 'image_upload':
             $images = [];
             if (isset($existingData['images']) && is_array($existingData['images'])) {

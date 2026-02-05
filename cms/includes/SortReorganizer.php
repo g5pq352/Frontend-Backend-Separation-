@@ -98,7 +98,7 @@ class SortReorganizer
             } else {
                 $cleanField = str_replace('`', '', $field);
                 $placeholderName = "cond_" . preg_replace('/[^a-zA-Z0-9_]/', '', $cleanField);
-                $whereConditions[] = "{$field} = :{$placeholderName}";
+                $whereConditions[] = "`{$cleanField}` = :{$placeholderName}";
                 $params[":{$placeholderName}"] = $value;
             }
         }
@@ -245,6 +245,18 @@ class SortReorganizer
         if ($groupField || $parentIdField || $categoryField || $lang) {
             // 找出所有分組組合
             $fields = array_filter([$groupField, $categoryField, $parentIdField]);
+            
+            // 【新增】檢查並加入 t_level 分組 (使用者要求)
+            try {
+                $checkTLevel = $conn->prepare("SHOW COLUMNS FROM `{$tableName}` LIKE 't_level'");
+                $checkTLevel->execute();
+                if ($checkTLevel->fetch()) {
+                    $fields[] = 't_level';
+                }
+            } catch (Exception $e) {
+                // 忽略錯誤
+            }
+
             if ($lang) $fields[] = 'lang'; // 加入語系分組
 
             $fieldSql = implode(', ', $fields);

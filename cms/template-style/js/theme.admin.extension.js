@@ -609,6 +609,7 @@ window.admin = {};
 	};
 
 	PluginDatePicker.defaults = {
+		format: 'yyyy-mm-dd'
 	};
 
 	PluginDatePicker.prototype = {

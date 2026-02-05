@@ -89,21 +89,28 @@ $categoryName = $hasCategory ? $moduleConfig['listPage']['categoryName'] : null;
 $categoryField = $hasCategory ? $moduleConfig['listPage']['categoryField'] : null;
 // 【重構】動態處理分類選取與階層自動補全
 $selectedCategory = null;
+$selectedCategories = []; // 儲存所有層級的選擇
 if ($hasCategory) {
-    // 找出目前獲取的最高層級 selectedX
-    $maxSelectedIdx = 0;
-    for ($i = 10; $i >= 1; $i--) {
-        if (isset($_GET['selected' . $i]) && $_GET['selected' . $i] !== '' && $_GET['selected' . $i] !== 'all') {
-            $maxSelectedIdx = $i;
-            break;
+    // 1. 找出目前獲器的所有層級 (支援無限層)
+    $maxScanDepth = 20; 
+    for ($i = 1; $i <= $maxScanDepth; $i++) {
+        $param = 'selected' . $i;
+        if (isset($_GET[$param]) && $_GET[$param] !== '' && $_GET[$param] !== 'all' && $_GET[$param] !== '0') {
+            $val = (int)$_GET[$param];
+            $selectedCategories[$i-1] = $val;
+            $selectedCategory = $val; // 最深層的值
+        } else {
+            break; // 中斷即停止，確保連續性
         }
     }
 
+    $maxSelectedIdx = count($selectedCategories);
+
     if ($maxSelectedIdx > 0) {
-        $deepestVal = (int)$_GET['selected' . $maxSelectedIdx];
+        $deepestVal = $selectedCategory;
         
-        // 如果只提供了一個參數，但它可能不是第一層，則自動補全
-        if ($maxSelectedIdx == 1 && is_array($categoryField) && count($categoryField) > 1) {
+        // 【向上補全】如果只提供了一個參數，但它可能不是第一層，則自動向上補路徑
+        if ($maxSelectedIdx == 1 && is_array($categoryField)) {
             $path = [];
             $currentId = $deepestVal;
             while ($currentId > 0) {
@@ -128,6 +135,23 @@ if ($hasCategory) {
                 exit;
             }
         }
+
+        // 【向下鑽取 (Auto Drill-down)】如果當前選取的分類有子分類，直接跳到第一個子分類
+        // 這解決了「父層無法排序」的問題，強制使用者進入最底層或有資料的層級
+        $children = ($deepestVal > 0) ? getSubCategoryOptions($categoryName, $deepestVal) : [];
+        if (!empty($children)) {
+            $nextLevel = $maxSelectedIdx + 1;
+            $firstChildId = $children[0]['id'];
+            
+            // 檢查 URL 是否已經有下一層，如果沒有才跳轉
+            if (!isset($_GET['selected' . $nextLevel])) {
+                $redirectUrl = $_SERVER['REQUEST_URI'];
+                $sep = (strpos($redirectUrl, '?') === false) ? '?' : '&';
+                header("Location: {$redirectUrl}{$sep}selected{$nextLevel}={$firstChildId}");
+                exit;
+            }
+        }
+
         $selectedCategory = $deepestVal;
     }
 }
@@ -395,7 +419,7 @@ if ($hasCategory && $selectedCategory && !$isTrashMode) {
             $configUseTaxonomyMapSort = $moduleConfig['listPage']['useTaxonomyMapSort'] ?? true;
 
             if ($mapTableStmt && $mapTableStmt->rowCount() > 0 && $configUseTaxonomyMapSort) {
-                // 使用 data_taxonomy_map 表（推薦）
+                // 使用 data_taxonomy_map 表
                 $conditions[] = "EXISTS (
                     SELECT 1 FROM data_taxonomy_map
                     WHERE data_taxonomy_map.d_id = {$tableAlias}.{$col_id}
@@ -403,14 +427,19 @@ if ($hasCategory && $selectedCategory && !$isTrashMode) {
                 )";
                 $params[':categoryId'] = $selectedCategory;
             } else {
-                // 降級使用 d_tag 欄位（向後兼容）
-                // 修正：如果不是用 Map Table，那就是直接過濾欄位 (例如 d_class2)
-                // 【修正】如果是連動分類（陣列），使用第一個欄位
-                $actualCategoryField = is_array($categoryField) ? $categoryField[0] : $categoryField;
-                $conditions[] = "{$tableAlias}.{$actualCategoryField} = :categoryId";
-                // 原本的 FIND_IN_SET 也可以，但對於 d_class2 這種 INT 欄位，用 = 比較準確且快
-                // $conditions[] = "FIND_IN_SET(:categoryId, {$tableAlias}.{$actualCategoryField})";
-                $params[':categoryId'] = $selectedCategory;
+                // 動態處理多個分類欄位 (將 selected1, 2, 3... 對應到 d_class1, 2, 3...)
+                if (is_array($categoryField)) {
+                    foreach ($selectedCategories as $idx => $catId) {
+                        $col = $categoryField[$idx] ?? null;
+                        if ($col) {
+                            $conditions[] = "{$tableAlias}.{$col} = :cid{$idx}";
+                            $params[":cid{$idx}"] = $catId;
+                        }
+                    }
+                } else {
+                    $conditions[] = "{$tableAlias}.{$categoryField} = :categoryId";
+                    $params[':categoryId'] = $selectedCategory;
+                }
             }
         } else {
             // 如果不合法，清空變數以便 UI 顯示「全部」
@@ -787,36 +816,46 @@ require_once('display_page.php');
                                                         <label class="ws-nowrap me-3 mb-0">Filter By:</label>
                                                         
                                                         <?php if ($isLinkedCategory): ?>
-                                                            <?php foreach ($categoryField as $index => $field): 
-                                                                $level = $index + 1;
-                                                                $paramName = 'selected' . $level;
-                                                                $currentVal = $selectedCategories[$index] ?? null;
-                                                                $prevVal = ($level > 1) ? ($selectedCategories[$index-1] ?? null) : 0;
+                                                            <?php 
+                                                            $level = 1;
+                                                            $prevVal = 0;
+                                                            $continueLoop = true;
+                                                            while ($continueLoop):
+                                                                $currentVal = $selectedCategories[$level-1] ?? null;
                                                                 
-                                                                // 決定是否顯示：第一層或是前一層有值
-                                                                $show = ($level == 1 || !empty($prevVal));
+                                                                // 找出這一層的選項
+                                                                $levelOptions = [];
+                                                                if ($level == 1) {
+                                                                    $levelOptions = $categories; // 頂層
+                                                                } elseif (!empty($prevVal) && $prevVal !== 'all') {
+                                                                    $levelOptions = getSubCategoryOptions($categoryName, $prevVal);
+                                                                }
+
+                                                                // 如果沒有選項，停止渲染
+                                                                if ($level > 1 && empty($levelOptions)) break;
                                                             ?>
                                                                 <select name="select<?= $level ?>" id="select<?= $level ?>" 
                                                                     class="form-control select-style-1 me-2 category-filter" 
                                                                     data-category="<?= $categoryName ?>" 
                                                                     data-level="<?= $level ?>" 
-                                                                    style="width: auto;<?= $show ? '' : 'display:none;' ?>">
+                                                                    style="width: auto;">
                                                                     <?php if ($level == 1): ?>
                                                                         <option value="all">全部</option>
-                                                                        <?php foreach ($categories as $cat): ?>
-                                                                            <option value="<?= $cat['id'] ?>" <?= ($currentVal == $cat['id']) ? 'selected' : '' ?>><?= $cat['name'] ?></option>
-                                                                        <?php endforeach; ?>
-                                                                    <?php else: ?>
-                                                                        <option value="">請選擇...</option>
-                                                                        <?php if (!empty($prevVal)): 
-                                                                            $childCategories = getSubCategoryOptions($categoryName, $prevVal);
-                                                                            foreach ($childCategories as $child): ?>
-                                                                                <option value="<?= $child['id'] ?>" <?= ($currentVal == $child['id']) ? 'selected' : '' ?>><?= $child['name'] ?></option>
-                                                                            <?php endforeach;
-                                                                        endif; ?>
                                                                     <?php endif; ?>
+
+                                                                    <?php foreach ($levelOptions as $opt): ?>
+                                                                        <option value="<?= $opt['id'] ?>" <?= ($currentVal == $opt['id']) ? 'selected' : '' ?>><?= $opt['name'] ?></option>
+                                                                    <?php endforeach; ?>
                                                                 </select>
-                                                            <?php endforeach; ?>
+                                                            <?php 
+                                                                if (empty($currentVal) || $currentVal === 'all') {
+                                                                    $continueLoop = false;
+                                                                } else {
+                                                                    $prevVal = $currentVal;
+                                                                    $level++;
+                                                                }
+                                                                if ($level > 20) break;
+                                                            endwhile; ?>
                                                         <?php else: ?>
                                                             <!-- 單一分類 -->
                                                             <select name="select1" id="select1" class="form-control select-style-1 filter-by">
@@ -949,7 +988,7 @@ require_once('display_page.php');
                                                                     $imgStmt->execute([':file_type' => $imageFileType, ':id' => $rowId]);
                                                                     $imgRow = $imgStmt->fetch();
                                                                     if ($imgRow) {
-                                                                        echo "<img src=\"../{$imgRow['file_link1']}\" style=\"max-width: 100px;\">";
+                                                                        echo "<img src=\"../{$imgRow['file_link1']}\" style=\"width: 100px;height: 70px;object-fit: cover;\">";
                                                                     } else {
                                                                         echo "<img src=\"image/default_image_s.jpg\">";
                                                                     }
@@ -976,7 +1015,33 @@ require_once('display_page.php');
                                                                 }
                                                             } else {
                                                                 // 正常模式
-                                                                switch ($col['type']) {
+                                                                 switch ($col['type']) {
+                                                                    case 'category_path':
+                                                                        $cName = $col['category'] ?? $moduleConfig['listPage']['categoryName'] ?? null;
+                                                                        $cFields = $moduleConfig['listPage']['categoryField'] ?? null;
+                                                                        $tId = 0;
+                                                                        
+                                                                        // 【修正】優先從連動分類配置 (categoryField) 中尋找最深層的值
+                                                                        if (is_array($cFields)) {
+                                                                            foreach (array_reverse($cFields) as $cf) {
+                                                                                if (!empty($row[$cf])) {
+                                                                                    $tId = $row[$cf];
+                                                                                    break;
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                        
+                                                                        // 如果連動分類中沒找到，才使用該欄位本身的值
+                                                                        if (!$tId && !empty($row[$col['field']])) {
+                                                                            $tId = $row[$col['field']];
+                                                                        }
+                                                                        
+                                                                        if ($tId && $cName) {
+                                                                            echo getCategoryPathHtml($cName, $tId, $module);
+                                                                        } else {
+                                                                            echo '-';
+                                                                        }
+                                                                        break;
                                                                     case 'date':
                                                                     case 'text':
                                                                         // 【首頁顯示管理】不顯示連結
@@ -1057,7 +1122,7 @@ require_once('display_page.php');
                                                                         if (isset($_GET['language'])) $detailParams[] = "language=" . urlencode($_GET['language']);
                                                                         $detailUrl = PORTAL_AUTH_URL . "tpl={$module}/detail?" . implode('&', $detailParams);
                                                                         
-                                                                        echo "<a href=\"{$detailUrl}\"><img src=\"../{$imgRow['file_link2']}\"></a>";
+                                                                        echo "<a href=\"{$detailUrl}\"><img src=\"../{$imgRow['file_link2']}\" style=\"width: 100px;height: 70px;object-fit: cover;\"></a>";
                                                                     } else {
                                                                         $detailParams = ["{$primaryKey}={$rowId}"];
                                                                         foreach ($_GET as $key => $value) {
@@ -1934,7 +1999,13 @@ SwalConfirmElement::render();
             success: function(response) {
                 if (response.success) {
                     Swal.fire('成功', response.message, 'success').then(() => {
-                        window.location.reload();
+                        // 【修改】跳轉到目標語系頁面
+                        const urlParams = new URLSearchParams(window.location.search);
+                        urlParams.set('language', targetLang);
+                        // 移除分頁參數，因為目標語系可能有不同的資料量
+                        urlParams.delete('pageNum');
+                        urlParams.delete('totalRows');
+                        window.location.href = '<?= PORTAL_AUTH_URL ?>tpl=<?= $module ?>/list?' + urlParams.toString();
                     });
                 } else {
                     Swal.fire('失敗', response.message, 'error');
@@ -2145,11 +2216,11 @@ SwalConfirmElement::render();
             const val = $this.val();
             const categoryName = $this.data('category');
             
-            // 如果選擇了「全部」或空值
-            if (val === 'all' || val === '') {
+            // 如果選擇了「全部」或空值 (常規 'all' 或一些舊邏輯帶入的 '0')
+            if (val === 'all' || val === '' || val === '0') {
                 const url = new URL(window.location);
                 // 移除當前層級及之後的所有層級參數
-                for (let l = level; l <= 10; l++) {
+                for (let l = level; l <= 20; l++) {
                     url.searchParams.delete('selected' + l);
                 }
                 url.searchParams.delete('pageNum');
@@ -2177,13 +2248,17 @@ SwalConfirmElement::render();
                             const url = new URL(window.location);
                             url.searchParams.set('selected' + level, val);
                             url.searchParams.set('selected' + (level + 1), firstChildId);
+                            // 移除更深層的參數
+                            for (let l = level + 2; l <= 20; l++) {
+                                url.searchParams.delete('selected' + l);
+                            }
                             url.searchParams.delete('pageNum');
                             window.location.href = url.toString();
                         } else {
                             // 沒有子分類，直接在當前層級過濾，並移除後續層級參數
                             const url = new URL(window.location);
                             url.searchParams.set('selected' + level, val);
-                            for (let l = level + 1; l <= 10; l++) {
+                            for (let l = level + 1; l <= 20; l++) {
                                 url.searchParams.delete('selected' + l);
                             }
                             url.searchParams.delete('pageNum');

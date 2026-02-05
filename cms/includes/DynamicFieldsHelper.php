@@ -533,9 +533,16 @@ class DynamicFieldsHelper
         $sort = 0;
         foreach ($newImages as $img) {
             $fileId = is_array($img) ? ($img['file_id'] ?? null) : $img;
+            $title  = is_array($img) ? ($img['title'] ?? null) : null;
 
             if (!$fileId || $fileId === '__DELETE__' || $fileId === '') {
                 continue;
+            }
+
+            // 更新標題
+            if ($title !== null) {
+                $this->stmt("UPDATE file_set SET file_title=? WHERE file_id=?")
+                     ->execute([$title, $fileId]);
             }
 
             $this->insertRow($d_id, $fieldGroup, $uid, $fieldName, null, $fileId, (int)$gi, $sort++);
@@ -566,23 +573,41 @@ class DynamicFieldsHelper
             if ($this->isImageField($name, $fieldConfig)) {
                 $isMultiple = $fieldDef ? ($fieldDef['multiple'] ?? false) : false;
 
-                if ($isMultiple && is_array($value)) {
-                    // 多圖模式：插入多筆記錄
-                    foreach ($value as $img) {
-                        $fid = is_array($img) ? ($img['file_id'] ?? null) : $img;
+                    if ($isMultiple && is_array($value)) {
+                        // 多圖模式：插入多筆記錄
+                        foreach ($value as $img) {
+                            $fid = is_array($img) ? ($img['file_id'] ?? null) : $img;
+                            $title = is_array($img) ? ($img['title'] ?? null) : null;
+
+                            if (!$fid || $fid === '__DELETE__') {
+                                continue;
+                            }
+
+                            // 更新標題
+                            if ($title !== null) {
+                                $this->stmt("UPDATE file_set SET file_title=? WHERE file_id=?")
+                                     ->execute([$title, $fid]);
+                            }
+
+                            $this->insertRow($d_id, $fieldGroup, $uid, $name, null, $fid, (int)$gi, $sort++);
+                        }
+                    } else {
+                        // 單圖模式
+                        $fid = is_array($value) ? ($value['file_id'] ?? null) : $value;
+                        $title = is_array($value) ? ($value['title'] ?? null) : null;
+
                         if (!$fid || $fid === '__DELETE__') {
                             continue;
                         }
+
+                        // 更新標題
+                        if ($title !== null) {
+                            $this->stmt("UPDATE file_set SET file_title=? WHERE file_id=?")
+                                 ->execute([$title, $fid]);
+                        }
+
                         $this->insertRow($d_id, $fieldGroup, $uid, $name, null, $fid, (int)$gi, $sort++);
                     }
-                } else {
-                    // 單圖模式
-                    $fid = is_array($value) ? ($value['file_id'] ?? null) : $value;
-                    if (!$fid || $fid === '__DELETE__') {
-                        continue;
-                    }
-                    $this->insertRow($d_id, $fieldGroup, $uid, $name, null, $fid, (int)$gi, $sort++);
-                }
             } else {
                 if (trim((string)$value) === '') {
                     continue;

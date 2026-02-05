@@ -15,7 +15,7 @@ $baseDir    = $UPLOAD_BASE; // 來自 thumbs_helper
 $trashRoot = $baseDir . '/_trash';
 
 // === 【新增】計算當前頁面 URL (用於查詢參數連結) ===
-$currentPageUrl = strtok($_SERVER['REQUEST_URI'] ?? $backend_url . '/trash_picker.php', '?');
+$currentPageUrl = strtok($_SERVER['REQUEST_URI'] ?? APP_BACKEND_PATH . '/trash_picker.php', '?');
 
 // 確保結構存在
 $imgDir           = $trashRoot . '/images';
@@ -243,16 +243,16 @@ if ($viewMode === 'list') {
 
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fancyapps/ui/dist/fancybox.css" />
     <script src="https://cdn.jsdelivr.net/npm/@fancyapps/ui/dist/fancybox.umd.js"></script>
-    <link rel="stylesheet" href="<?= $backend_url ?>/gallery/style/style.css">
+    <link rel="stylesheet" href="<?= APP_BACKEND_PATH ?>/gallery/style/style.css">
 </head>
 <body class="page-trash">
     <div class="app-wrapper">
         <aside class="sidebar">
             <h3>垃圾桶</h3>
-            <button class="nav-btn primary" onclick="location.href='<?= $backend_url ?>/image_picker.php?mode=picker'">← 回圖片庫</button>
+            <button class="nav-btn primary" onclick="location.href='<?= APP_BACKEND_PATH ?>/image_picker.php?mode=picker'">← 回圖片庫</button>
             <br>
             <?php if ($viewMode === 'folder_detail') : ?>
-                <button class="nav-btn" onclick="location.href='<?= $backend_url ?>/trash_picker.php'">← 回垃圾桶首頁</button>
+                <button class="nav-btn" onclick="location.href='<?= APP_BACKEND_PATH ?>/trash_picker.php'">← 回垃圾桶首頁</button>
             <?php endif; ?>
         </aside>
 
@@ -278,7 +278,7 @@ if ($viewMode === 'list') {
                             $origDir  = $info['dirname'] ?? '';
                             $origFile = $info['basename'] ?? '';
 
-                            $fullUrl = $base_gallery_url . $frontend_url . "/uploads/_trash/images/$id.$ext"; // 原圖路徑
+                            $fullUrl = $base_gallery_url . APP_FRONTEND_PATH . "/uploads/_trash/images/$id.$ext"; // 原圖路徑
                             // 這裡維持原圖/縮圖判斷邏輯
                             $showSrc = file_exists(__DIR__ . "/uploads/_trash/thumbs/$id.$ext")
                                 ? "uploads/_trash/thumbs/$id.$ext"
@@ -327,7 +327,7 @@ if ($viewMode === 'list') {
                                     </div>
                                     <div class="folder-preview">
                                         <?php if ($totalImgCount > 0) : foreach ($previewImgs as $src) : ?>
-                                                <img src="<?= htmlspecialchars($base_gallery_url . $frontend_url . '/' . $src, ENT_QUOTES) ?>">
+                                                <img src="<?= htmlspecialchars($base_gallery_url . APP_FRONTEND_PATH . '/' . $src, ENT_QUOTES) ?>">
                                             <?php endforeach;
                                         else : ?>
                                             <span class="no-img">無圖片</span>
@@ -391,10 +391,10 @@ if ($viewMode === 'list') {
                                 $ext = strtolower(pathinfo($item['name'], PATHINFO_EXTENSION));
                                 $isImage = is_image_ext($ext);
                             ?>
-                                <a href="<?= htmlspecialchars($base_gallery_url . $frontend_url . '/' . $item['full_url'], ENT_QUOTES) ?>" <?php if ($isImage) : ?> data-fancybox="trash-folder-gallery" data-caption="<?= htmlspecialchars($item['name']) ?>" <?php else : ?> target="_blank" <?php endif; ?> class="card-link <?= $isImage ? 'is-image' : 'is-file' ?>">
+                                <a href="<?= htmlspecialchars($base_gallery_url . APP_FRONTEND_PATH . '/' . $item['full_url'], ENT_QUOTES) ?>" <?php if ($isImage) : ?> data-fancybox="trash-folder-gallery" data-caption="<?= htmlspecialchars($item['name']) ?>" <?php else : ?> target="_blank" <?php endif; ?> class="card-link <?= $isImage ? 'is-image' : 'is-file' ?>">
 
                                     <?php if ($isImage) : ?>
-                                        <img src="<?= htmlspecialchars($base_gallery_url . $frontend_url . '/' . $item['thumb_url'], ENT_QUOTES) ?>" class="detail-thumb" loading="lazy">
+                                        <img src="<?= htmlspecialchars($base_gallery_url . APP_FRONTEND_PATH . '/' . $item['thumb_url'], ENT_QUOTES) ?>" class="detail-thumb" loading="lazy">
                                     <?php else : ?>
                                         <span class="detail-icon">📄</span>
                                     <?php endif; ?>
@@ -421,4 +421,4 @@ if ($viewMode === 'list') {
 </body>
 </html>
 
-<script src="<?= $backend_url ?>/gallery/js/app.js"></script>
+<script src="<?= APP_BACKEND_PATH ?>/gallery/js/app.js"></script>

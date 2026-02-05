@@ -33,6 +33,15 @@ class UnifiedSortManager
             $categoryField = $config['listPage']['categoryField'] ?? null;
             $useTaxonomyMapSort = $config['listPage']['useTaxonomyMapSort'] ?? false;
 
+            // 【修正】如果 menuValue 為 null 但有 menuKey (常見於分類模組)，嘗試從資料中抓取目前群組值
+            if ($menuKey && $menuValue === null && $dataId) {
+                try {
+                    $mValStmt = $conn->prepare("SELECT `{$menuKey}` FROM `{$tableName}` WHERE `{$primaryKey}` = :id");
+                    $mValStmt->execute([':id' => $dataId]);
+                    $menuValue = $mValStmt->fetchColumn();
+                } catch (Exception $e) {}
+            }
+
             // 取得語系資訊
             $lang = $context['lang'] ?? null;
             if (!$lang && $dataId) {
@@ -108,7 +117,7 @@ class UnifiedSortManager
                         $conditions[] = "ds.lang = " . $conn->quote($lang);
                     }
                     if ($isSoftDelete && $col_delete_time) {
-                        $conditions[] = "ds.{$col_delete_time} IS NULL";
+                        $conditions[] = "(ds.{$col_delete_time} IS NULL OR ds.{$col_delete_time} = '' OR ds.{$col_delete_time} = '0000-00-00 00:00:00')";
                     }
 
                     $whereClause = !empty($conditions) ? 'WHERE ' . implode(' AND ', $conditions) : '';
@@ -181,7 +190,7 @@ class UnifiedSortManager
             $params = [];
 
             if (!empty($context['menuKey']) && $context['menuValue'] !== null) {
-                $whereConditions[] = "{$context['menuKey']} = :menuValue";
+                $whereConditions[] = "`{$context['menuKey']}` = :menuValue";
                 $params[':menuValue'] = $context['menuValue'];
             }
 
@@ -190,22 +199,34 @@ class UnifiedSortManager
                 $params[':lang'] = $context['lang'];
             }
 
+            $groupByFields = [$col_sort];
+            
+            // 【修正】如果沒有指定 menuValue，則必須將 menuKey 納入分組，避免跨類型干擾 (如不同 taxonomy_type_id)
+            if (!empty($context['menuKey']) && $context['menuValue'] === null) {
+                $groupByFields[] = "`{$context['menuKey']}`";
+            }
+
             if (!empty($context['parentIdField'])) {
-                // 分層級檢查
-                $whereConditions[] = "({$context['parentIdField']} = 0 OR {$context['parentIdField']} IS NULL)";
+                $groupByFields[] = "`{$context['parentIdField']}`";
             }
 
-            if ($context['isSoftDelete'] && !empty($context['col_delete_time'])) {
-                $whereConditions[] = "{$context['col_delete_time']} IS NULL";
-            }
+            // 【新增】檢查並加入 t_level 分組 (使用者要求)
+            try {
+                $checkTLevel = $conn->prepare("SHOW COLUMNS FROM `{$tableName}` LIKE 't_level'");
+                $checkTLevel->execute();
+                if ($checkTLevel->fetch()) {
+                    $groupByFields[] = 't_level';
+                }
+            } catch (Exception $e) {}
 
+            $groupByClause = implode(', ', $groupByFields);
             $whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
 
             // 查找重複的 sort 數字
-            $sql = "SELECT {$col_sort}, COUNT(*) as cnt
+            $sql = "SELECT {$groupByClause}, COUNT(*) as cnt
                     FROM {$tableName}
                     {$whereClause}
-                    GROUP BY {$col_sort}
+                    GROUP BY {$groupByClause}
                     HAVING cnt > 1";
 
             $stmt = $conn->prepare($sql);
@@ -261,7 +282,7 @@ class UnifiedSortManager
                 'dtm.t_id = :t_id',
                 'dtm.map_level = :map_level',
                 '(dtm.d_top = 0 OR dtm.d_top IS NULL)',
-                "ds.d_delete_time IS NULL"
+                "(ds.d_delete_time IS NULL OR ds.d_delete_time = '' OR ds.d_delete_time = '0000-00-00 00:00:00')"
             ];
             $params = [':t_id' => $taxonomyId, ':map_level' => $mapLevel];
 

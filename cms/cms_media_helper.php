@@ -39,8 +39,7 @@ function cms_get_media_url_by_id($mediaId) {
         $pathParts = explode('/', $relativePath);
         $encodedPath = implode('/', array_map('rawurlencode', $pathParts));
         
-        global $frontend_url;
-        return $frontend_url . '/uploads/' . $encodedPath;
+        return APP_FRONTEND_PATH . '/uploads/' . $encodedPath;
         
     } catch (Exception $e) {
         error_log("Error getting media URL: " . $e->getMessage());

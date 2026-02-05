@@ -268,7 +268,7 @@ function renderTree(array $nodes, string $currentPath, int $level = 0): void
     
     <?php require_once('head.php');?>
 
-    <link rel="stylesheet" href="<?= $backend_url ?>/gallery/style/style.css">
+    <link rel="stylesheet" href="<?= APP_BACKEND_PATH ?>/gallery/style/style.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
     <style>
@@ -315,7 +315,7 @@ function renderTree(array $nodes, string $currentPath, int $level = 0): void
 
     <script>
         // 設定全域變數供 app.js 和 upload.js 使用
-        window.AJAX_SCRIPT = '<?= $backend_url ?>/image_picker.php';
+        window.AJAX_SCRIPT = '<?= APP_BACKEND_PATH ?>/image_picker.php';
         window.currentPath = '<?= htmlspecialchars($currentPath, ENT_QUOTES) ?>';
         // 輸出 ID
         window.currentFolderId = <?= json_encode($currentFolderId) ?>;
@@ -384,7 +384,7 @@ function renderTree(array $nodes, string $currentPath, int $level = 0): void
         }
     </script>
 
-    <script src="<?= $backend_url ?>/gallery/js/app.js"></script>
-    <script src="<?= $backend_url ?>/gallery/js/upload.js"></script>
+    <script src="<?= APP_BACKEND_PATH ?>/gallery/js/app.js"></script>
+    <script src="<?= APP_BACKEND_PATH ?>/gallery/js/upload.js"></script>
 </body>
 </html>

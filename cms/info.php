@@ -19,7 +19,6 @@ require_once(__DIR__ . '/includes/buttonElement.php');
 require_once(__DIR__ . '/includes/permissionCheck.php');
 require_once(__DIR__ . '/includes/DynamicFieldsHelper.php');
 require_once(__DIR__ . '/upload_process.php');
-require_once(__DIR__ . '/imagesSize.php');
 
 // 獲取模組名稱
 $module = $_GET['module'] ?? '';
@@ -320,11 +319,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['MM_update'])) {
             }
         }
 
-        // 3.2 處理圖片更換 (替換現有圖片)
+        // 3.2 處理圖片/檔案更換 (替換現有圖片)
         $updatedFileIds = [];
         foreach ($moduleConfig['detailPage'] as $sheet) {
             foreach ($sheet['items'] as $item) {
-                if ($item['type'] === 'image_upload') {
+                if ($item['type'] === 'image_upload' || $item['type'] === 'image' || $item['type'] === 'file_upload') {
                     $fieldName = $item['field'] . '_update';
                     if (isset($_FILES[$fieldName]) && !empty($_FILES[$fieldName]['name'])) {
                         foreach ($_FILES[$fieldName]['name'] as $fId => $fName) {
@@ -349,7 +348,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['MM_update'])) {
                                     $targetW = $item['size'][0]['w'] ?? 800;
                                     $targetH = $item['size'][0]['h'] ?? 600;
 
-                                    $img_result = image_process($conn, $singleFile, [$origRow['file_title']], $origRow['file_type'], "edit", $targetW, $targetH);
+                                    if ($item['type'] === 'file_upload') {
+                                        $format = $item['format'] ?? '*';
+                                        $maxSize = $item['size']['maxSize'] ?? (defined('DEFAULT_MAX_IMG_SIZE') ? DEFAULT_MAX_IMG_SIZE : 10);
+                                        $acceptParam = ['format' => $format, 'maxSize' => $maxSize];
+                                        $img_result = file_process($conn, $singleFile, [$origRow['file_title']], $origRow['file_type'], "edit", $acceptParam);
+                                    } else {
+                                        $img_result = image_process($conn, $singleFile, [$origRow['file_title']], $origRow['file_type'], "edit", $targetW, $targetH);
+                                    }
 
                                     // 檢查狀態碼 (index 0) 是否為 0 (成功)
                                     if (isset($img_result[0][0]) && $img_result[0][0] == 0 && count($img_result) >= 2) {
@@ -359,13 +365,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['MM_update'])) {
                                                 @unlink("../" . $origRow[$link]);
                                             }
                                         }
-                                        // 修正：根據 upload_process.php 的返回結構對應索引
-                                        // 結構: [0]=db_name, [1]=大圖, [2]=S100, [3]=S460
-                                        $updateImgSQL = "UPDATE file_set SET file_name=?, file_link1=?, file_link2=?, file_link3=? WHERE file_id=?";
-                                        $stmtUpdateImg = $conn->prepare($updateImgSQL);
-                                        $stmtUpdateImg->execute([
-                                            $img_result[1][0], $img_result[1][1], $img_result[1][2], $img_result[1][3], $fId
-                                        ]);
+
+                                        if ($item['type'] === 'file_upload') {
+                                            $updateImgSQL = "UPDATE file_set SET file_name=?, file_link1=? WHERE file_id=?";
+                                            $stmtUpdateImg = $conn->prepare($updateImgSQL);
+                                            $stmtUpdateImg->execute([
+                                                $img_result[1][0], $img_result[1][1], $fId
+                                            ]);
+                                        } else {
+                                            $updateImgSQL = "UPDATE file_set SET file_name=?, file_link1=?, file_link2=?, file_link3=? WHERE file_id=?";
+                                            $stmtUpdateImg = $conn->prepare($updateImgSQL);
+                                            $stmtUpdateImg->execute([
+                                                $img_result[1][0], $img_result[1][1], $img_result[1][2], $img_result[1][3], $fId
+                                            ]);
+                                        }
                                     }
                                 }
                             }
@@ -396,25 +409,77 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['MM_update'])) {
             }
         }
 
-        // 4. 動態圖片處理邏輯 (新增圖片)
+        // 4. 動態圖片處理邏輯 (新增圖片 - 支援 image_upload, image, file_upload)
         foreach ($moduleConfig['detailPage'] as $sheet) {
             foreach ($sheet['items'] as $item) {
-                if ($item['type'] == 'image_upload') {
+                if ($item['type'] == 'image_upload' || $item['type'] == 'image' || $item['type'] == 'file_upload') {
                     $fName = $item['field'];
-                    if (isset($_FILES[$fName]) && !empty($_FILES[$fName]['name'][0])) {
+                    
+                    // 檢查是否有任何檔案被上傳
+                    $hasAnyFile = false;
+                    if (isset($_FILES[$fName]['name'])) {
+                        if (is_array($_FILES[$fName]['name'])) {
+                            foreach ($_FILES[$fName]['name'] as $fileName) {
+                                if (!empty($fileName)) {
+                                    $hasAnyFile = true;
+                                    break;
+                                }
+                            }
+                        } elseif (!empty($_FILES[$fName]['name'])) {
+                            $hasAnyFile = true;
+                        }
+                    }
+
+                    if ($hasAnyFile) {
                         $targetW = $item['size'][0]['w'] ?? 800;
                         $targetH = $item['size'][0]['h'] ?? 600;
-                        $dbFileType = $item['fileType'] ?? 'image';
+                        $dbFileType = $item['fileType'] ?? ($item['type'] == 'file_upload' ? 'file' : 'image');
 
-                        $maxSizeMB = $item['maxSize'] ?? $item['size']['maxSize'] ?? (defined('DEFAULT_MAX_IMG_SIZE') ? DEFAULT_MAX_IMG_SIZE : 2);
+                        // 判斷是用 image_process 還是 file_process
+                        if ($item['type'] == 'file_upload') {
+                            $format = $item['format'] ?? '*';
+                            $maxSize = $item['size']['maxSize'] ?? (defined('DEFAULT_MAX_IMG_SIZE') ? DEFAULT_MAX_IMG_SIZE : 10);
+                            $acceptParam = ['format' => $format, 'maxSize' => $maxSize];
+                            
+                            $image_result = file_process($conn, $_FILES[$fName], $_REQUEST[$fName . '_title'] ?? [], $menu_is, ($dataId > 0) ? "edit" : "add", $acceptParam);
+                        } else {
+                            $image_result = image_process($conn, $_FILES[$fName], $_REQUEST[$fName . '_title'] ?? [], $menu_is, ($dataId > 0) ? "edit" : "add", $targetW, $targetH);
+                        }
 
-                        $image_result = image_process($conn, $_FILES[$fName], $_REQUEST[$fName . '_title'] ?? [], $menu_is, ($dataId > 0) ? "edit" : "add", $targetW, $targetH);
+                        // 取得目前該 fileType 的最大 file_sort 值
+                        $maxSortStmt = $conn->prepare("SELECT COALESCE(MAX(file_sort), 0) as max_sort FROM file_set WHERE {$col_file_fk} = ? AND file_type = ?");
+                        $maxSortStmt->execute([$redirectId, $dbFileType]);
+                        $maxSort = $maxSortStmt->fetch(PDO::FETCH_ASSOC)['max_sort'];
 
                         for ($j = 1; $j < count($image_result); $j++) {
-                            $stmtFile = $conn->prepare("INSERT INTO file_set (file_name, file_link1, file_link2, file_link3, file_type, {$col_file_fk}, file_title, file_show_type) VALUES (?,?,?,?,?,?,?,?)");
-                            $stmtFile->execute([
-                                $image_result[$j][0], $image_result[$j][1], $image_result[$j][2], $image_result[$j][3], $dbFileType, $redirectId, $image_result[$j][4], $image_result[$j][5]
-                            ]);
+                            $newSort = $maxSort + $j;
+                            
+                            if ($item['type'] == 'file_upload') {
+                                // 一般檔案上傳只存 link1
+                                $stmtFile = $conn->prepare("INSERT INTO file_set (file_name, file_link1, file_type, {$col_file_fk}, file_title, file_sort) VALUES (?,?,?,?,?,?)");
+                                $stmtFile->execute([
+                                    $image_result[$j][0], 
+                                    $image_result[$j][1], 
+                                    $dbFileType, 
+                                    $redirectId, 
+                                    $image_result[$j][2], 
+                                    $newSort
+                                ]);
+                            } else {
+                                // 圖片上傳存 link1, link2, link3
+                                $stmtFile = $conn->prepare("INSERT INTO file_set (file_name, file_link1, file_link2, file_link3, file_type, {$col_file_fk}, file_title, file_show_type, file_sort) VALUES (?,?,?,?,?,?,?,?,?)");
+                                $stmtFile->execute([
+                                    $image_result[$j][0], 
+                                    $image_result[$j][1], 
+                                    $image_result[$j][2], 
+                                    $image_result[$j][3], 
+                                    $dbFileType, 
+                                    $redirectId, 
+                                    $image_result[$j][4], 
+                                    $image_result[$j][5],
+                                    $newSort
+                                ]);
+                            }
                         }
                     }
                 }
@@ -612,11 +677,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['MM_update'])) {
                 $dynamicData = [];
                 if (isset($_POST[$fieldName]) && is_array($_POST[$fieldName])) {
 
-                    // Debug: 記錄原始 POST 資料
-                    error_log("=== Dynamic Fields POST Data ===");
-                    error_log("Field Name: " . $fieldName);
-                    error_log("POST Data: " . print_r($_POST[$fieldName], true));
-
                     foreach ($_POST[$fieldName] as $groupIndex => $group) {
 
                         $groupData = [];
@@ -685,10 +745,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['MM_update'])) {
 
                         $dynamicData[$groupIndex] = $groupData;
                     }
-
-                    // Debug: 記錄處理後的資料
-                    error_log("=== Processed Dynamic Data ===");
-                    error_log(print_r($dynamicData, true));
                 }
 
                 /* =====================================================
@@ -807,13 +863,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['MM_update'])) {
                                 } catch (PDOException $e) {
                                     error_log("❌ UPDATE FAILED: " . $e->getMessage());
                                 }
-                            } else {
-                                error_log("⚠ Skipping - No valid file_id found");
                             }
                         }
                     }
-                } else {
-                    error_log("❌ POST data not found or not array for {$fieldName}");
                 }
 
                 /* =====================================================
@@ -821,21 +873,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['MM_update'])) {
                  * ===================================================== */
                 $fieldConfig = $item['fields'] ?? [];
 
-                // Debug: 記錄即將儲存的資料
-                error_log("=== Calling saveFields ===");
-                error_log("redirectId: " . $redirectId);
-                error_log("fieldGroup: " . $fieldGroup);
-                error_log("dynamicData: " . print_r($dynamicData, true));
-                error_log("fieldConfig: " . print_r($fieldConfig, true));
-
                 $result = $dynamicFieldsHelper->saveFields(
                     $redirectId,
                     $fieldGroup,
                     $dynamicData,
                     $fieldConfig
                 );
-
-                error_log("=== saveFields completed ===");
             }
         }
 
@@ -901,14 +944,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['MM_update'])) {
                                     
                                     <?php if ($tableHasLang && count($activeLanguages) > 1): ?>
                                     <div class="col-12 col-lg-auto ms-auto">
-                                        <div class="btn-group" role="group">
-                                            <?php foreach ($activeLanguages as $lang): ?>
-                                                <a href="<?=PORTAL_AUTH_URL?>tpl=<?php echo $module; ?>/info?language=<?php echo $lang['l_slug']; ?>" 
-                                                   class="btn btn-sm <?php echo ($currentLang === $lang['l_slug']) ? 'btn-primary' : 'btn-light'; ?>">
-                                                    <?php echo $lang['l_name']; ?>
-                                                </a>
+                                        <ul class="nav nav-pills nav-pills-primary">
+                                            <?php foreach ($activeLanguages as $lang): 
+                                                $activeClass = ($lang['l_slug'] == $currentLang) ? 'active' : '';
+                                                $langUrl = PORTAL_AUTH_URL."tpl={$module}/info?language=" . $lang['l_slug'];
+                                            ?>
+                                                <li class="nav-item">
+                                                    <a class="nav-link <?= $activeClass ?> py-1 px-3" href="<?= $langUrl ?>"><?= $lang['l_name'] ?></a>
+                                                </li>
                                             <?php endforeach; ?>
-                                        </div>
+                                        </ul>
                                     </div>
                                     <?php endif; ?>
                                 </div>

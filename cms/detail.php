@@ -22,7 +22,6 @@ require_once(__DIR__ . '/includes/taxonomyMapHelper.php');
 require_once(__DIR__ . '/includes/DynamicFieldsHelper.php');
 require_once(__DIR__ . '/cms_media_helper.php');
 require_once(__DIR__ . '/upload_process.php');
-require_once(__DIR__ . '/imagesSize.php');
 
 // 獲取模組名稱
 $module = $_GET['module'] ?? '';
@@ -200,9 +199,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$isTrashView) {
             }
         }
 
-        // 4. 【新增】自動填入語系欄位（僅限新增模式）
-        if (!$isUpdate && $tableHasLang && $autoLangContext) {
-            $fields['lang'] = $autoLangContext;
+        // 4. 【修正】自動填入語系欄位（新增與更新模式）
+        // 優先使用 POST 傳來的 lang 值（語系切換時會更新），若無則使用 autoLangContext
+        if ($tableHasLang) {
+            if (isset($_POST['lang']) && !empty($_POST['lang'])) {
+                // 使用表單傳來的語系值（支援語系切換）
+                $fields['lang'] = $_POST['lang'];
+            } elseif (!$isUpdate && $autoLangContext) {
+                // 新增模式且沒有 POST lang 時，使用 autoLangContext
+                $fields['lang'] = $autoLangContext;
+            }
         }
 
         // 【新增】自動處理 canCreate 標籤
@@ -903,11 +909,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$isTrashView) {
                     $dynamicData = [];
                     if (isset($_POST[$fieldName]) && is_array($_POST[$fieldName])) {
 
-                        // Debug: 記錄原始 POST 資料
-                        error_log("=== Dynamic Fields POST Data ===");
-                        error_log("Field Name: " . $fieldName);
-                        error_log("POST Data: " . print_r($_POST[$fieldName], true));
-
                         foreach ($_POST[$fieldName] as $groupIndex => $group) {
 
                             $groupData = [];
@@ -943,7 +944,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$isTrashView) {
                                             foreach ($value as $imgIndex => $imgData) {
                                                 if (is_array($imgData) && isset($imgData['file_id']) && !empty($imgData['file_id'])) {
                                                     $imageArray[] = [
-                                                        'file_id' => $imgData['file_id']
+                                                        'file_id' => $imgData['file_id'],
+                                                        'title'   => $imgData['title'] ?? ($imgData['file_info']['file_title'] ?? '')
                                                     ];
                                                 }
                                             }
@@ -976,148 +978,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$isTrashView) {
 
                             $dynamicData[$groupIndex] = $groupData;
                         }
-
-                        // Debug: 記錄處理後的資料
-                        error_log("=== Processed Dynamic Data ===");
-                        error_log(print_r($dynamicData, true));
-                    }
-
-                    /* =====================================================
-                     * 2.5️⃣ 處理動態欄位的圖片說明更新（UID-based）
-                     * ===================================================== */
-                    $uidTitleMap = [];
-                    
-                    if (isset($_POST[$fieldName]) && is_array($_POST[$fieldName])) {
-                        foreach ($_POST[$fieldName] as $key => $value) {
-                            // 如果 key 不是數字,就是 UID
-                            if (!is_numeric($key) && is_array($value)) {
-                                $uid = $key;
-                                
-                                // 遍歷這個 UID 下的所有欄位
-                                foreach ($value as $fieldKey => $fieldValue) {
-                                    if (strpos($fieldKey, '_title') !== false) {
-                                        // 這是圖片說明欄位
-                                        $imageName = str_replace('_title', '', $fieldKey);
-                                        if (!isset($uidTitleMap[$uid])) {
-                                            $uidTitleMap[$uid] = [];
-                                        }
-                                        $uidTitleMap[$uid][$imageName] = $fieldValue;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // ⭐ 步驟2: 遍歷每個群組,使用 UID 查找對應的 title
-                    if (isset($_POST[$fieldName]) && is_array($_POST[$fieldName])) {
-                        foreach ($_POST[$fieldName] as $groupIndex => $groupData) {
-                            // 跳過 UID-based 的資料(已經在步驟1處理過了)
-                            if (!is_numeric($groupIndex)) {
-                                continue;
-                            }
-
-                            if (!is_array($groupData)) {
-                                continue;
-                            }
-
-                            // 取得這個群組的 UID
-                            $uid = $groupData['_uid'] ?? null;
-                            if (!$uid) {
-                                continue;
-                            }
-
-                            // 遍歷設定檔中的所有圖片欄位
-                            foreach ($item['fields'] as $fieldDef) {
-                                if ($fieldDef['type'] !== 'image') {
-                                    continue;
-                                }
-
-                                $imageName = $fieldDef['name'];
-
-                                // ⭐ 從 UID-Title Map 中取得 title
-                                $title = $uidTitleMap[$uid][$imageName] ?? null;
-                                
-                                if ($title === null) {
-                                    error_log("⚠ No title found for UID={$uid}, image={$imageName}");
-                                    continue;
-                                }
-
-                                // 取得 file_id
-                                $fileId = null;
-                                $fileIdKey = "{$imageName}_file_id";
-
-                                // 方法1: 從 POST 取得 (上傳新圖片時)
-                                if (isset($groupData[$fileIdKey]) && $groupData[$fileIdKey] !== '' && $groupData[$fileIdKey] !== null) {
-                                    $fileId = $groupData[$fileIdKey];
-                                }
-                                // 方法2: 從資料庫查詢 (只改標題時)
-                                else {
-                                    try {
-                                        $stmtFindFile = $conn->prepare("
-                                            SELECT df_file_id 
-                                            FROM data_dynamic_fields 
-                                            WHERE df_d_id = :d_id 
-                                              AND df_field_group = :field_group 
-                                              AND df_group_uid = :uid 
-                                              AND df_field_name = :field_name
-                                              AND df_file_id IS NOT NULL
-                                            LIMIT 1
-                                        ");
-                                        $stmtFindFile->execute([
-                                            ':d_id' => $redirectId,
-                                            ':field_group' => $fieldGroup,
-                                            ':uid' => $uid,
-                                            ':field_name' => $imageName
-                                        ]);
-                                        
-                                        $existingFileId = $stmtFindFile->fetchColumn();
-                                        
-                                        if ($existingFileId) {
-                                            $fileId = $existingFileId;
-                                        } else {
-                                        }
-                                    } catch (PDOException $e) {
-                                        error_log("❌ DB query failed: " . $e->getMessage());
-                                    }
-                                }
-
-                                // ⭐ 如果找到 file_id,執行更新
-                                if ($fileId && $fileId !== '__DELETE__' && is_numeric($fileId)) {
-                                    try {
-                                        $stmtUpdateTitle = $conn->prepare("
-                                            UPDATE file_set
-                                            SET file_title = :title
-                                            WHERE file_id = :id
-                                        ");
-                                        $stmtUpdateTitle->execute([
-                                            ':title' => $title,
-                                            ':id' => $fileId
-                                        ]);
-
-                                        $rowsAffected = $stmtUpdateTitle->rowCount();
-                                    } catch (PDOException $e) {
-                                        error_log("❌ UPDATE FAILED: " . $e->getMessage());
-                                    }
-                                } else {
-                                    error_log("⚠ Skipping - No valid file_id found");
-                                }
-                            }
-                        }
-                    } else {
-                        error_log("❌ POST data not found or not array for {$fieldName}");
-                    }
+                     }
 
                     /* =====================================================
                      * 3️⃣ 儲存
                      * ===================================================== */
                     $fieldConfig = $item['fields'] ?? [];
-
-                    // Debug: 記錄即將儲存的資料
-                    error_log("=== Calling saveFields ===");
-                    error_log("redirectId: " . $redirectId);
-                    error_log("fieldGroup: " . $fieldGroup);
-                    error_log("dynamicData: " . print_r($dynamicData, true));
-                    error_log("fieldConfig: " . print_r($fieldConfig, true));
 
                     $result = $dynamicFieldsHelper->saveFields(
                         $redirectId,
@@ -1125,8 +991,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$isTrashView) {
                         $dynamicData,
                         $fieldConfig
                     );
-
-                    error_log("=== saveFields completed ===");
                 }
             }
 
@@ -1250,19 +1114,50 @@ if ($action == 'edit') {
         }
     }
 } else {
+    // --- [新增] 新增模式：從 URL 預填資料 (例如從分類過濾列表點擊新增) ---
     $rowData = ['images' => []];
-    // 1. 處理預選分類 (Category)
-    if (isset($_GET['preselect_category']) && !empty($_GET['preselect_category'])) {
-        $categoryField = $moduleConfig['listPage']['categoryField'] ?? null;
-        if ($categoryField)
-            $rowData[$categoryField] = intval($_GET['preselect_category']);
+    
+    // 1. 處理父層 ID (自關聯層級，如分類管理)
+    if ($hasHierarchicalNav && $parentIdField) {
+        if (isset($_GET['parent_id']) && $_GET['parent_id'] !== '') {
+            $rowData[$parentIdField] = (int)$_GET['parent_id'];
+        } elseif (isset($_GET['preselect_category']) && $_GET['preselect_category'] !== '') {
+            $rowData[$parentIdField] = (int)$_GET['preselect_category'];
+        }
     }
 
-    // 2. 【新增】處理預選父層 (Parent ID)
-    // 如果網址有帶 parent_id=7，我們就把它塞進 $rowData 對應的欄位中
-    // 這樣 renderSelect 渲染時就會收到 value=7，自動選中該選項
-    if ($parentIdField && isset($_GET['parent_id']) && $_GET['parent_id'] > 0) {
-        $rowData[$parentIdField] = intval($_GET['parent_id']);
+    // 2. 處理分類 (selectedN 或 preselect_category，如商品所屬分類)
+    $configCategoryField = $moduleConfig['listPage']['categoryField'] ?? null;
+    if ($configCategoryField) {
+        $categoryFields = is_array($configCategoryField) ? $configCategoryField : [$configCategoryField];
+        
+        // A. 處理多層級參數 selected1, selected2...
+        foreach ($categoryFields as $index => $field) {
+            $paramName = 'selected' . ($index + 1);
+            if (isset($_GET[$paramName]) && $_GET[$paramName] !== '' && $_GET[$paramName] !== 'all') {
+                $rowData[$field] = (int)$_GET[$paramName];
+            }
+        }
+        
+        // B. 相容舊款單一分類參數 preselect_category (如果該欄位還沒被填，且非多欄位模式)
+        if (isset($_GET['preselect_category']) && $_GET['preselect_category'] !== '') {
+            $firstField = is_array($configCategoryField) ? $configCategoryField[0] : $configCategoryField;
+            if (!isset($rowData[$firstField])) {
+                $rowData[$firstField] = (int)$_GET['preselect_category'];
+            }
+        }
+    }
+    
+    // 3. 處理配置中的預設值 (針對還沒被預填的欄位)
+    foreach ($moduleConfig['detailPage'] as $sheet) {
+        foreach ($sheet['items'] as $item) {
+            if (isset($item['field']) && isset($item['value'])) {
+                $field = $item['field'];
+                if (!is_array($field) && !isset($rowData[$field])) {
+                    $rowData[$field] = $item['value'];
+                }
+            }
+        }
     }
 }
 

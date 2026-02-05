@@ -24,7 +24,7 @@ $settingPage = [
             ['field' => 'sort_order', 'label' => '排序', 'type' => 'sort', 'width' => '74'],
             ['field' => 'created_at', 'label' => '建立日期', 'type' => 'date', 'width' => '142'],
             ['field' => 'ttp_name', 'label' => '分類名稱', 'type' => 'text', 'width' => '400'],
-            ['field' => 'ttp_id', 'label' => 'ID', 'type' => 'text', 'width' => '100'],
+            ['field' => 'ttp_category', 'label' => '分類英文', 'type' => 'text', 'width' => '100'],
             ['field' => 'ttp_active', 'label' => '狀態', 'type' => 'active', 'width' => '60'],
             ['field' => 'edit', 'label' => '編輯', 'type' => 'button', 'width' => '30'],
             ['field' => 'delete', 'label' => '刪除', 'type' => 'button', 'width' => '30'],

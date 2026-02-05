@@ -56,14 +56,12 @@ try {
         $rowData['t_slug'] .= '-' . $targetLang;
     }
 
-    // 【新增】智慧分類對應
+    // 【新增】智慧分類對應（支援多層分類）
     $hasCategory = $moduleConfig['listPage']['hasCategory'] ?? false;
     $categoryField = $moduleConfig['listPage']['categoryField'] ?? '';
     $categoryName = $moduleConfig['listPage']['categoryName'] ?? '';
 
-    if ($hasCategory && $categoryField && !empty($rowData[$categoryField]) && $categoryName) {
-        $oldCatId = $rowData[$categoryField];
-        
+    if ($hasCategory && $categoryField && $categoryName) {
         // 1. 找出分類表設定
         $catMenuStmt = $conn->prepare("SELECT menu_table, menu_pk FROM cms_menus WHERE menu_type = :type LIMIT 1");
         $catMenuStmt->execute([':type' => $categoryName]);
@@ -74,26 +72,63 @@ try {
             $cPK = ($cTable === 'taxonomies') ? 't_id' : 'd_id';
             $cTitleCol = ($cTable === 'taxonomies') ? 't_name' : 'd_title';
 
-            // 2. 獲取原始分類的名稱
-            $oldCatSql = "SELECT {$cTitleCol} FROM {$cTable} WHERE {$cPK} = :id";
-            $oldCatStmt = $conn->prepare($oldCatSql);
-            $oldCatStmt->execute([':id' => $oldCatId]);
-            $oldCatTitle = $oldCatStmt->fetchColumn();
+            // 檢查 categoryField 是否為陣列（多層分類）
+            if (is_array($categoryField)) {
+                // 處理多層分類：遍歷每個層級欄位
+                foreach ($categoryField as $field) {
+                    if (!empty($rowData[$field])) {
+                        $oldCatId = $rowData[$field];
+                        
+                        // 2. 獲取原始分類的名稱
+                        $oldCatSql = "SELECT {$cTitleCol} FROM {$cTable} WHERE {$cPK} = :id";
+                        $oldCatStmt = $conn->prepare($oldCatSql);
+                        $oldCatStmt->execute([':id' => $oldCatId]);
+                        $oldCatTitle = $oldCatStmt->fetchColumn();
 
-            if ($oldCatTitle) {
-                // 3. 在目標語系中找同名的分類
-                $newCatSql = "SELECT {$cPK} FROM {$cTable} WHERE {$cTitleCol} = :title AND lang = :lang LIMIT 1";
-                $newCatStmt = $conn->prepare($newCatSql);
-                $newCatStmt->execute([':title' => $oldCatTitle, ':lang' => $targetLang]);
-                $newCatId = $newCatStmt->fetchColumn();
+                        if ($oldCatTitle) {
+                            // 3. 在目標語系中找同名的分類
+                            $newCatSql = "SELECT {$cPK} FROM {$cTable} WHERE {$cTitleCol} = :title AND lang = :lang LIMIT 1";
+                            $newCatStmt = $conn->prepare($newCatSql);
+                            $newCatStmt->execute([':title' => $oldCatTitle, ':lang' => $targetLang]);
+                            $newCatId = $newCatStmt->fetchColumn();
 
-                if ($newCatId) {
-                    $rowData[$categoryField] = $newCatId; // 成功對應到目標語系的分類
-                } else {
-                    $rowData[$categoryField] = 0;
+                            if ($newCatId) {
+                                $rowData[$field] = $newCatId; // 成功對應到目標語系的分類
+                            } else {
+                                $rowData[$field] = 0;
+                            }
+                        } else {
+                            $rowData[$field] = 0;
+                        }
+                    }
                 }
             } else {
-                $rowData[$categoryField] = 0;
+                // 處理單一分類欄位（向後兼容）
+                if (!empty($rowData[$categoryField])) {
+                    $oldCatId = $rowData[$categoryField];
+                    
+                    // 2. 獲取原始分類的名稱
+                    $oldCatSql = "SELECT {$cTitleCol} FROM {$cTable} WHERE {$cPK} = :id";
+                    $oldCatStmt = $conn->prepare($oldCatSql);
+                    $oldCatStmt->execute([':id' => $oldCatId]);
+                    $oldCatTitle = $oldCatStmt->fetchColumn();
+
+                    if ($oldCatTitle) {
+                        // 3. 在目標語系中找同名的分類
+                        $newCatSql = "SELECT {$cPK} FROM {$cTable} WHERE {$cTitleCol} = :title AND lang = :lang LIMIT 1";
+                        $newCatStmt = $conn->prepare($newCatSql);
+                        $newCatStmt->execute([':title' => $oldCatTitle, ':lang' => $targetLang]);
+                        $newCatId = $newCatStmt->fetchColumn();
+
+                        if ($newCatId) {
+                            $rowData[$categoryField] = $newCatId; // 成功對應到目標語系的分類
+                        } else {
+                            $rowData[$categoryField] = 0;
+                        }
+                    } else {
+                        $rowData[$categoryField] = 0;
+                    }
+                }
             }
         }
     }

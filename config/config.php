@@ -11,15 +11,12 @@ $dotenv->load();
  * 【新的統一常數】（推薦使用）：
  * - APP_PROTOCOL       : 協議（如：http:// 或 https://）
  * - APP_HOST           : 域名（如：localhost）
- * - APP_FRONTEND_PATH  : 前端路徑（如：/template-ver5 或 空字串）
- * - APP_BACKEND_PATH   : 後端路徑（如：/template-ver5/cms 或 /cms）
+ * - APP_FRONTEND_PATH  : 前端路徑（如：/template-backend 或 空字串）
+ * - APP_BACKEND_PATH   : 後端路徑（如：/template-backend/cms 或 /cms）
  * - APP_BASE_URL       : 完整前端 URL = APP_PROTOCOL + APP_HOST + APP_FRONTEND_PATH
  *
  * 【向後相容變數】（舊代碼使用）：
- * - $frontend_url      : 等同於 APP_FRONTEND_PATH
- * - $backend_url       : 等同於 APP_BACKEND_PATH
  * - $base_gallery_url  : 等同於 APP_PROTOCOL + APP_HOST
- * - BASIC_URL          : 等同於 APP_BASE_URL
  *
  * 使用建議：
  * - 新代碼：使用 APP_* 開頭的常數
@@ -38,18 +35,25 @@ define('SYSTEM_TEMPLATE', $_ENV['SYSTEM_TEMPLATE']); // 模板目錄 有 views /
 // 環境判斷與 URL 路徑設定（統一管理）
 // ========================================
 // 自動判斷本機或正式環境
-$is_local = in_array($_SERVER['HTTP_HOST'], ['127.0.0.1', 'localhost']);
+define('IS_LOCAL', in_array($_SERVER['HTTP_HOST'], ['127.0.0.1', 'localhost']));
 
-// 定義路徑常數
-if ($is_local) {
-    define('APP_FRONTEND_PATH', '/template-ver5');
-    define('APP_BACKEND_PATH', '/template-ver5/cms');
-    define('PORTAL_AUTH_URL', '/template-ver5/portal-auth/');
-} else {
-    define('APP_FRONTEND_PATH', '');
-    define('APP_BACKEND_PATH', '/cms');
-    define('PORTAL_AUTH_URL', '/portal-auth/');
-}
+// 定義基礎路徑（本機環境使用專案資料夾名稱，正式環境為空）
+define('APP_ROOT_PATH', IS_LOCAL ? '/template-ver5' : '');
+
+// 定義路徑常數（基於 APP_ROOT_PATH）
+define('APP_FRONTEND_PATH', APP_ROOT_PATH);
+define('APP_BACKEND_PATH', APP_ROOT_PATH . '/cms');
+define('PORTAL_AUTH_URL', APP_ROOT_PATH . '/portal-auth/');
+
+// ========================================
+// IP 白名單設定
+// ========================================
+define('ALLOWED_IPS', [
+    '127.0.0.1',
+    '::1',
+    'localhost',
+    '59.126.31.214'
+]);
 
 // URL 組件
 $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https://' : 'http://';
@@ -59,10 +63,7 @@ define('APP_HOST', $host);
 define('APP_BASE_URL', $protocol . $host . APP_FRONTEND_PATH);  // 完整前端 URL
 
 // 向後相容的變數（供舊代碼使用）
-$frontend_url = APP_FRONTEND_PATH;
-$backend_url = APP_BACKEND_PATH;
 $base_gallery_url = $protocol . $host;
-if (!defined('BASIC_URL')) define('BASIC_URL', APP_BASE_URL);
 
 // ========================================
 // 基礎路徑設定
@@ -80,7 +81,11 @@ if (!defined('ROOT_PATH')) define('ROOT_PATH', $rootPath);
 // ========================================
 define('DEFAULT_LANG_SLUG', 'tw');                               // 預設語系代碼（用於內部處理、URL、檔案路徑等）
 define('DEFAULT_LANG_LOCALE', 'zh-Hant-TW');                     // 預設語系地區（用於 HTML lang 屬性）
-define('IMG_PATH_FORMAT', '/img/{lang}/');                       // 圖片路徑格式（{lang} 會被替換為實際語系）
+if(SYSTEM_TEMPLATE == 'template') { // 圖片路徑格式（{lang} 會被替換為實際語系）
+    define('IMG_PATH_FORMAT', '/img/{lang}/');
+}else{
+    define('IMG_PATH_FORMAT', '/images/{lang}/');
+}
 define('TEMPLATE_PATH', realpath(__DIR__ . '/../template/'));   // 模板目錄絕對路徑
 
 // ========================================

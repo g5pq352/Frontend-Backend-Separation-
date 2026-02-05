@@ -1,15 +1,15 @@
 <?php
+// 1. 引入資料庫連線
+require_once realpath(__DIR__ . '/../../Connections/connect2data.php');
+require_once realpath(__DIR__ . '/../../config/config.php'); 
+
 /**
  * 超級管理員配置
  */
 
 return array (
-  'allowed_ips' => 
-  array (
-    0 => '127.0.0.1',
-    1 => '::1',
-    2 => '59.126.31.214',
-  ),
+  // 使用統一配置的 IP 白名單（定義於 config/config.php）
+  'allowed_ips' => ALLOWED_IPS,
   'super_admin' => 
   array (
     'user_id' => 999,
@@ -20,8 +20,7 @@ return array (
   'api_verification' => 
   array (
     'enabled' => true,
-    // 'endpoint' => 'https://backedapi.gdlinode.tw/cms/api_verify_ip.php',
-    'endpoint' => 'http://localhost/template-ver5/cms/api_verify_ip.php',
+    'endpoint' => APP_BASE_URL.'/cms/api_verify_ip.php',
     'secret_key' => 'test-secret-key-12345',
   ),
 );

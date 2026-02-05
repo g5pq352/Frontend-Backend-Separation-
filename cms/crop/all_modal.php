@@ -1,10 +1,10 @@
 <?php ob_start(); ?>
-<link rel="stylesheet" href="<?=BASIC_URL?>/cms/jquery/cropper/cropper.min.css" />
-<script src="<?=BASIC_URL?>/cms/jquery/cropper/cropper.min.js"></script>
-<script src="<?=BASIC_URL?>/cms/js/sweetalert2@11.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/pako@1.0.11/dist/pako.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/upng-js@2.1.0/UPNG.min.js"></script>
-<link rel="stylesheet" href="<?=BASIC_URL?>/cms/crop/crop.css" />
+<link rel="stylesheet" href="<?=APP_BASE_URL?>/cms/jquery/cropper/cropper.min.css" />
+<script src="<?=APP_BASE_URL?>/cms/jquery/cropper/cropper.min.js"></script>
+<script src="<?=APP_BASE_URL?>/cms/js/sweetalert2@11.js"></script>
+<script src="<?=APP_BASE_URL?>/cms/js/pako.min.js"></script>
+<script src="<?=APP_BASE_URL?>/cms/js/UPNG.min.js"></script>
+<link rel="stylesheet" href="<?=APP_BASE_URL?>/cms/crop/crop.css" />
 
 <template id="universalRowTemplate">
     <tr>

@@ -159,9 +159,30 @@ try {
             $baseConditions = ["1=1"];
             $baseParams = [];
 
-            if ($menuKey && $menuValue !== null) {
-                $baseConditions[] = "{$menuKey} = :menuValue";
-                $baseParams[':menuValue'] = $menuValue;
+            // 【新增】分層級排序處理 (判斷 parent_id 與 t_level)
+            $col_parent = $cols['parent_id'] ?? null;
+            if ($col_parent && array_key_exists($col_parent, $item)) {
+                $pVal = $item[$col_parent];
+                if ($pVal === null || $pVal === '' || $pVal === 0) {
+                    $baseConditions[] = "({$col_parent} = 0 OR {$col_parent} IS NULL OR {$col_parent} = '')";
+                } else {
+                    $baseConditions[] = "{$col_parent} = :pVal";
+                    $baseParams[':pVal'] = $pVal;
+                }
+            }
+            
+            // 如果有 t_level 欄位，也要判斷 (使用者特別提到)
+            if (isset($item['t_level'])) {
+                $baseConditions[] = "t_level = :tLevel";
+                $baseParams[':tLevel'] = $item['t_level'];
+            }
+
+            if ($menuKey) {
+                $mVal = ($menuValue !== null) ? $menuValue : ($item[$menuKey] ?? null);
+                if ($mVal !== null) {
+                    $baseConditions[] = "{$menuKey} = :menuValue";
+                    $baseParams[':menuValue'] = $mVal;
+                }
             }
 
             if (isset($item['lang'])) {
@@ -188,8 +209,7 @@ try {
                 $checkCol = $conn->prepare("SHOW COLUMNS FROM {$tableName} LIKE ?");
                 $checkCol->execute([$col_delete_time]);
                 if ($checkCol->fetch()) {
-                    // 【修正】僅檢查 IS NULL，移除對 '' 的判斷以避免 MySQL Strict Mode 報錯
-                    $baseConditions[] = "{$col_delete_time} IS NULL";
+                    $baseConditions[] = "({$col_delete_time} IS NULL OR {$col_delete_time} = '0000-00-00 00:00:00')";
                 }
             } catch (Exception $e) {
                 // 欄位不存在，忽略

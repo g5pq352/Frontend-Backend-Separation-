@@ -134,6 +134,48 @@ class DataRepository extends Model {
     }
 
     /**
+     * 取得模組列表（支援分類篩選和對應排序）
+     * 全部時用 d_sort 排序，有分類時用 sort_num 排序
+     */
+    public function getModuleList($class1, $fileType, $categoryId = null, $columns = '*', $limit = 0) {
+        $c1 = $this->escape($class1);
+        $ft = $this->escape($fileType);
+        $lang = $this->escape($this->currentLang);
+
+        if ($categoryId) {
+            // 有分類：JOIN data_taxonomy_map，用 sort_num 排序
+            $catId = $this->escape($categoryId);
+            
+            $sql = "SELECT $columns FROM data_set
+                    INNER JOIN file_set ON data_set.d_id = file_set.file_d_id
+                    INNER JOIN data_taxonomy_map ON data_set.d_id = data_taxonomy_map.d_id
+                    WHERE data_set.d_class1 = '$c1'
+                    AND data_set.lang = '$lang'
+                    AND data_set.d_delete_time IS NULL
+                    AND file_set.file_type = '$ft'
+                    AND data_set.d_active = 1
+                    AND data_taxonomy_map.t_id = '$catId'
+                    ORDER BY data_taxonomy_map.sort_num ASC";
+        } else {
+            // 無分類：用 d_sort 排序
+            $sql = "SELECT $columns FROM data_set
+                    INNER JOIN file_set ON data_set.d_id = file_set.file_d_id
+                    WHERE data_set.d_class1 = '$c1'
+                    AND data_set.lang = '$lang'
+                    AND data_set.d_delete_time IS NULL
+                    AND file_set.file_type = '$ft'
+                    AND data_set.d_active = 1
+                    ORDER BY data_set.d_sort ASC";
+        }
+
+        if ($limit > 0) {
+            $sql .= " LIMIT " . (int)$limit;
+        }
+
+        return $this->db->query($sql);
+    }
+
+    /**
      * 通用的撈取「單筆」資料方法
      */
     /**
