@@ -6,6 +6,9 @@
 session_start();
 require_once '../Connections/connect2data.php';
 
+// 解決 1292 Incorrect datetime value 錯誤 (局部設定)
+$conn->exec("SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'");
+
 // 【除錯】開啟錯誤顯示
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
@@ -206,10 +209,11 @@ try {
             // 排除軟刪除項目
             $col_delete_time = $cols['delete_time'] ?? 'd_delete_time';
             try {
-                $checkCol = $conn->prepare("SHOW COLUMNS FROM {$tableName} LIKE ?");
+                $checkCol = $conn->prepare("SHOW COLUMNS FROM `{$tableName}` LIKE ?");
                 $checkCol->execute([$col_delete_time]);
                 if ($checkCol->fetch()) {
-                    $baseConditions[] = "({$col_delete_time} IS NULL OR {$col_delete_time} = '0000-00-00 00:00:00')";
+                    // 使用 CAST 或更寬鬆的判斷來避免 Strict Mode 報錯
+                    $baseConditions[] = "({$col_delete_time} IS NULL OR {$col_delete_time} < '1000-01-01' OR {$col_delete_time} = '0000-00-00 00:00:00')";
                 }
             } catch (Exception $e) {
                 // 欄位不存在，忽略

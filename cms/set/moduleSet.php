@@ -31,7 +31,7 @@ $settingPage = [
         'categoryField' => $hasHierarchy ? ['d_class2', 'd_class3'] : 'd_class2',
         // ----------------------------------------------------------
         'hasCategory' => true, // 列表是否顯示Filter By
-        'useTaxonomyMapSort' => true, // 資料與分類關聯對照表
+        'useTaxonomyMapSort' => false, // 資料與分類關聯對照表 (目前資料集中在 d_class2，停用對照表查詢)
         'globalSort' => true, // 啟用全域排序
         // ----------------------------------------------------------
         'columns' => [
@@ -60,7 +60,7 @@ $settingPage = [
         'customQuery' => "SELECT data_set.*, taxonomies.t_name FROM data_set
                           LEFT JOIN taxonomies ON data_set.d_class2 = taxonomies.t_id
                           AND data_set.lang = taxonomies.lang
-                          AND (taxonomies.deleted_at IS NULL)",
+                          AND (taxonomies.deleted_at IS NULL OR taxonomies.deleted_at < '1000-01-01')",
     ],
     
     'detailPage' => [
