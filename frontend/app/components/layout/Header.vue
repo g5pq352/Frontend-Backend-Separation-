@@ -7,7 +7,7 @@
                 </NuxtLink>
             </div>
             <nav class="main-nav">
-                <NuxtLink to="/module" class="nav-link">模組</NuxtLink>
+                <!-- <NuxtLink to="/module" class="nav-link">模組</NuxtLink> -->
                 <NuxtLink to="https://backedapi.gdlinode.tw/portal-auth/signin" target="_blank" class="nav-link">後台登入</NuxtLink>
             </nav>
             <!-- <div class="user-actions">
@@ -25,21 +25,3 @@ const handleLoginClick = () => {
     window.dispatchEvent(event)
 }
 </script>
-
-<style scoped>
-.nav-link {
-    padding: 0.5rem 1rem;
-    text-decoration: none;
-    color: inherit;
-    transition: opacity 0.3s;
-}
-
-.nav-link:hover {
-    opacity: 0.7;
-}
-
-.nav-link.router-link-active {
-    font-weight: 600;
-    border-bottom: 2px solid currentColor;
-}
-</style>

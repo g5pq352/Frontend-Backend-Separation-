@@ -62,7 +62,7 @@ $settingPage = [
                 [
                     'type' => 'text',
                     'field' => 't_name',
-                    'label' => '分類名稱',
+                    'label' => '分類名稱 (中文)',
                     'required' => true,
                     'checkDuplicate' => true,
                 ],
@@ -77,7 +77,7 @@ $settingPage = [
                 //     'type' => 'select',
                 //     'field' => 't_tag',
                 //     'label' => '標籤',
-                //     'category' => ['taxCategory', 'newsC'], // ttp_category 的分類
+                //     'category' => ['taxCategory', 'moduleC'], // ttp_category 的分類
                 //     // 'multiple' => true,
                 // ],
                 [
@@ -101,30 +101,30 @@ $settingPage = [
                 ],
             ]
         ],
-        // [
-        //     'sheetTitle' => 'SEO設定',
-        //     'boxTitle'   => '搜尋引擎優化',
-        //     'items' => [
-        //         [
-        //             'type' => 'text',
-        //             'field' => 't_slug',
-        //             'label' => '網址別名 (slug)',
-        //             'note' => '用於網址列，留空則自動從標題產生'
-        //         ],
-        //         [
-        //             'type' => 'text',
-        //             'field' => 't_seo_title',
-        //             'label' => 'SEO 標題 (Meta Title)',
-        //             'note' => '建議長度：50-60 字元'
-        //         ],
-        //         [
-        //             'type' => 'textarea',
-        //             'field' => 't_description',
-        //             'label' => 'SEO 描述 (Meta Description)',
-        //             'note' => '建議長度：150-160 字元'
-        //         ],
-        //     ]
-        // ]
+        [
+            'sheetTitle' => 'SEO設定',
+            'boxTitle'   => '搜尋引擎優化',
+            'items' => [
+                [
+                    'type' => 'text',
+                    'field' => 't_slug',
+                    'label' => '網址別名 (slug)',
+                    'note' => '用於網址列，留空則自動從標題產生'
+                ],
+                [
+                    'type' => 'text',
+                    'field' => 't_seo_title',
+                    'label' => 'SEO 標題 (Meta Title)',
+                    'note' => '建議長度：50-60 字元'
+                ],
+                [
+                    'type' => 'textarea',
+                    'field' => 't_description',
+                    'label' => 'SEO 描述 (Meta Description)',
+                    'note' => '建議長度：150-160 字元'
+                ],
+            ]
+        ]
     ],
     
     'hiddenFields' => [

@@ -38,7 +38,7 @@ $settingPage = [
             ['field' => 'pin', 'label' => '置頂', 'type' => 'button', 'width' => '50'],
             ['field' => 'd_date', 'label' => '日期', 'type' => 'date', 'width' => '142'],
             ['field' => 'd_title', 'label' => '標題', 'type' => 'text', 'width' => '470'],
-            ['field' => 'd_view', 'label' => '瀏覽次數', 'type' => 'view_count', 'width' => '60'],
+            // ['field' => 'd_view', 'label' => '瀏覽次數', 'type' => 'view_count', 'width' => '60'],
             ['field' => 'image', 'label' => '圖片', 'type' => 'image', 'width' => '140'],
             ['field' => 'd_active', 'label' => '狀態', 'type' => 'active', 'width' => '60'],
             ['field' => 'edit', 'label' => '編輯', 'type' => 'button', 'width' => '30'],

@@ -31,7 +31,7 @@ $settingPage = [
         'categoryField' => $hasHierarchy ? ['d_class2', 'd_class3'] : 'd_class2',
         // ----------------------------------------------------------
         'hasCategory' => true, // 列表是否顯示Filter By
-        'useTaxonomyMapSort' => false, // 資料與分類關聯對照表 (目前資料集中在 d_class2，停用對照表查詢)
+        'useTaxonomyMapSort' => true, // 資料與分類關聯對照表
         'globalSort' => true, // 啟用全域排序
         // ----------------------------------------------------------
         'columns' => [
@@ -60,7 +60,7 @@ $settingPage = [
         'customQuery' => "SELECT data_set.*, taxonomies.t_name FROM data_set
                           LEFT JOIN taxonomies ON data_set.d_class2 = taxonomies.t_id
                           AND data_set.lang = taxonomies.lang
-                          AND (taxonomies.deleted_at IS NULL OR taxonomies.deleted_at < '1000-01-01')",
+                          AND (taxonomies.deleted_at IS NULL)",
     ],
     
     'detailPage' => [
@@ -95,9 +95,9 @@ $settingPage = [
                 //     'type' => 'select',
                 //     'field' => 'd_tag',
                 //     'label' => '標籤',
-                //     'category' => ['DataCategory', 'newsTag'], // d_class1 的分類
+                //     'category' => ['DataCategory', 'moduleTag'], // d_class1 的分類
                 //     'multiple' => true,
-                //     // 'imageConfig' => ['fileType' => 'newsTag'] // file_type 要不要抓圖片顯示在複選 
+                //     // 'imageConfig' => ['fileType' => 'moduleTag'] // file_type 要不要抓圖片顯示在複選 
                 // ],
                 // [
                 //     'type' => 'editor',
@@ -138,9 +138,9 @@ $settingPage = [
                 ],
                 // [
                 //     'type' => 'image_upload',
-                //     'field' => 'newsMCover',
+                //     'field' => 'moduleMCover',
                 //     'label' => '上傳封面手機圖片',
-                //     'fileType' => 'newsMCover',
+                //     'fileType' => 'moduleMCover',
                 //     'multiple' => false,
                 //     'dropzone' => false,
                 //     'size' => [
@@ -164,9 +164,9 @@ $settingPage = [
                 // ],
                 // [
                 //     'type' => 'image',
-                //     'field' => 'newsSimple',
+                //     'field' => 'moduleSimple',
                 //     'label' => '圖片上傳',
-                //     'fileType' => 'newsSimple',
+                //     'fileType' => 'moduleSimple',
                 //     // 'multiple' => true,
                 //     'format' => 'image/*',
                 //     'size' => [
@@ -177,9 +177,9 @@ $settingPage = [
                 // ],
                 // [
                 //     'type' => 'image',
-                //     'field' => 'newsRoom',
+                //     'field' => 'moduleRoom',
                 //     'label' => '房型圖片上傳',
-                //     'fileType' => 'newsRoom',
+                //     'fileType' => 'moduleRoom',
                 //     'multiple' => true,
                 //     'format' => 'image/*',
                 //     'size' => [
@@ -197,7 +197,7 @@ $settingPage = [
                 //     'size' => [
                 //         'maxSize' => 8,
                 //     ],
-                //     'fileType' => 'newsfile',
+                //     'fileType' => 'modulefile',
                 //     'note' => ''
                 // ],
             ]

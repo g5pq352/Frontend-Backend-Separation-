@@ -137,6 +137,9 @@ a {
 
 /* Filter Bar */
 .filter-bar {
+    position: sticky;
+    top: 69px; /* 配合 header 高度 (約69px) */
+    z-index: 40;
     background-color: var(--bg-card);
     padding: 1rem 0;
     border-bottom: 1px solid var(--border);
@@ -552,8 +555,31 @@ a {
     right: 0;
 }
 
+.nav-link {
+    padding: 0.5rem 1rem;
+    text-decoration: none;
+    color: inherit;
+    transition: opacity 0.3s;
+}
+
+.nav-link:hover {
+    opacity: 0.7;
+}
+
+.nav-link.router-link-active {
+    font-weight: 600;
+    border-bottom: 2px solid currentColor;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
+    .logo h1 {
+        font-size: 1rem;
+    }
+    .nav-link {
+        padding: 0.5rem 0.5rem;
+    }
+
     .detail-layout {
         flex-direction: column;
     }
@@ -570,6 +596,35 @@ a {
 
     .detail-info {
         flex: 1;
+    }
+
+    .main-nav{
+        width: 100%;
+        text-align: right;
+        a{
+            font-size: 0.9rem;
+        }
+    }
+
+    .filter-bar{
+        top: 81px;
+        .container{
+            gap: 1rem 1.5rem;
+        }
+    }
+
+    .filters-wrapper{
+        overflow-x: auto;
+        flex-wrap: nowrap;
+    }
+
+    .filter-btn{
+        width: max-content;
+    }
+
+    #search-input{
+        height: 34px;
+        font-size: 0.9rem;
     }
 }
 

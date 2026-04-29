@@ -45,6 +45,8 @@ const filtersData = computed(() => {
 const searchQuery = ref('')
 const currentView = ref('grid') // 'grid' or 'list'
 const showAuthModal = ref(false)
+const loadMoreTrigger = ref(null)
+let observer = null
 
 // 篩選器狀態
 const selectedType = ref(null)
@@ -61,6 +63,24 @@ const showAuthorDropdown = ref(false)
 const showProjectDropdown = ref(false)
 const showColorDropdown = ref(false)
 const showTagDropdown = ref(false)
+
+// 篩選器的搜尋狀態
+const filterSearch = reactive({
+    type: '',
+    category: '',
+    author: '',
+    project: '',
+    color: '',
+    tag: ''
+})
+
+// 根據搜尋過濾選項
+const getFilteredOptions = (type) => {
+    const keyword = filterSearch[type].toLowerCase()
+    const options = filtersData.value[type] || []
+    if (!keyword) return options
+    return options.filter(item => item.t_name.toLowerCase().includes(keyword))
+}
 
 // 篩選後的作品資料
 const filteredportfolio = computed(() => {
@@ -151,6 +171,23 @@ const filteredportfolio = computed(() => {
     }
 
     return result
+})
+
+// 顯示數量限制 (載入更多)
+const displayLimit = ref(24)
+
+// 最終顯示的作品資料
+const displayedPortfolio = computed(() => {
+    return filteredportfolio.value.slice(0, displayLimit.value)
+})
+
+const loadMore = () => {
+    displayLimit.value += 24
+}
+
+// 監聽篩選條件變化，重置顯示數量
+watch([searchQuery, selectedType, selectedCategory, selectedAuthor, selectedProject, selectedColor, selectedTag], () => {
+    displayLimit.value = 24
 })
 
 // 輔助函數：根據 ID 字串取得分類名稱
@@ -290,6 +327,7 @@ const toggleView = (view) => {
 
 // 切換下拉選單
 const toggleDropdown = (type) => {
+    Object.keys(filterSearch).forEach(key => filterSearch[key] = '')
     if (type === 'type') {
         showTypeDropdown.value = !showTypeDropdown.value
         showCategoryDropdown.value = false
@@ -391,6 +429,7 @@ const resetFilters = () => {
     selectedProject.value = null
     selectedColor.value = null
     selectedTag.value = null
+    Object.keys(filterSearch).forEach(key => filterSearch[key] = '')
     showTypeDropdown.value = false
     showCategoryDropdown.value = false
     showAuthorDropdown.value = false
@@ -420,6 +459,17 @@ onMounted(() => {
     // 監聽全域點擊事件以關閉下拉選單
     window.addEventListener('click', closeAllDropdowns)
 
+    // 無限滾動 (Infinite Scroll) 觀察器
+    observer = new IntersectionObserver((entries) => {
+        if (entries[0].isIntersecting && filteredportfolio.value.length > displayedPortfolio.value.length) {
+            loadMore()
+        }
+    }, { rootMargin: '50px' }) // 提早 50px 觸發載入
+
+    if (loadMoreTrigger.value) {
+        observer.observe(loadMoreTrigger.value)
+    }
+
     // GSAP 動畫
     if (typeof gsap !== 'undefined') {
         gsap.fromTo('.website-card', {
@@ -438,6 +488,9 @@ onMounted(() => {
     onUnmounted(() => {
         window.removeEventListener('open-auth-modal', handleAuthModalEvent)
         window.removeEventListener('click', closeAllDropdowns)
+        if (observer) {
+            observer.disconnect()
+        }
     })
 })
 </script>
@@ -461,17 +514,23 @@ onMounted(() => {
                         {{ getFilterLabel('author') }} <i class="fa-solid fa-chevron-down"></i>
                     </button>
                     <div class="filter-dropdown" v-if="showAuthorDropdown" @click.stop>
-                        <div
-                            v-for="item in filtersData.author"
-                            :key="item.t_id"
-                            class="filter-item"
-                            :class="{ active: selectedAuthor == item.t_id }"
-                            @click="selectFilter('author', item.t_id)"
-                        >
-                            {{ item.t_name }}
+                        <div class="filter-search-box">
+                            <i class="fa-solid fa-magnifying-glass"></i>
+                            <input type="text" v-model="filterSearch.author" placeholder="搜尋作者..." @click.stop>
                         </div>
-                        <div v-if="!filtersData.author?.length" class="filter-item empty">
-                            暫無資料
+                        <div class="filter-options-list">
+                            <div
+                                v-for="item in getFilteredOptions('author')"
+                                :key="item.t_id"
+                                class="filter-item"
+                                :class="{ active: selectedAuthor == item.t_id }"
+                                @click="selectFilter('author', item.t_id)"
+                            >
+                                {{ item.t_name }}
+                            </div>
+                            <div v-if="!getFilteredOptions('author').length" class="filter-item empty">
+                                暫無資料
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -486,17 +545,23 @@ onMounted(() => {
                         {{ getFilterLabel('project') }} <i class="fa-solid fa-chevron-down"></i>
                     </button>
                     <div class="filter-dropdown" v-if="showProjectDropdown" @click.stop>
-                        <div
-                            v-for="item in filtersData.project"
-                            :key="item.t_id"
-                            class="filter-item"
-                            :class="{ active: selectedProject == item.t_id }"
-                            @click="selectFilter('project', item.t_id)"
-                        >
-                            {{ item.t_name }}
+                        <div class="filter-search-box">
+                            <i class="fa-solid fa-magnifying-glass"></i>
+                            <input type="text" v-model="filterSearch.project" placeholder="搜尋專案..." @click.stop>
                         </div>
-                        <div v-if="!filtersData.project?.length" class="filter-item empty">
-                            暫無資料
+                        <div class="filter-options-list">
+                            <div
+                                v-for="item in getFilteredOptions('project')"
+                                :key="item.t_id"
+                                class="filter-item"
+                                :class="{ active: selectedProject == item.t_id }"
+                                @click="selectFilter('project', item.t_id)"
+                            >
+                                {{ item.t_name }}
+                            </div>
+                            <div v-if="!getFilteredOptions('project').length" class="filter-item empty">
+                                暫無資料
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -511,17 +576,23 @@ onMounted(() => {
                         {{ getFilterLabel('type') }} <i class="fa-solid fa-chevron-down"></i>
                     </button>
                     <div class="filter-dropdown" v-if="showTypeDropdown" @click.stop>
-                        <div
-                            v-for="item in filtersData.type"
-                            :key="item.t_id"
-                            class="filter-item"
-                            :class="{ active: selectedType == item.t_id }"
-                            @click="selectFilter('type', item.t_id)"
-                        >
-                            {{ item.t_name }}
+                        <div class="filter-search-box">
+                            <i class="fa-solid fa-magnifying-glass"></i>
+                            <input type="text" v-model="filterSearch.type" placeholder="搜尋類型..." @click.stop>
                         </div>
-                        <div v-if="!filtersData.type?.length" class="filter-item empty">
-                            暫無資料
+                        <div class="filter-options-list">
+                            <div
+                                v-for="item in getFilteredOptions('type')"
+                                :key="item.t_id"
+                                class="filter-item"
+                                :class="{ active: selectedType == item.t_id }"
+                                @click="selectFilter('type', item.t_id)"
+                            >
+                                {{ item.t_name }}
+                            </div>
+                            <div v-if="!getFilteredOptions('type').length" class="filter-item empty">
+                                暫無資料
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -536,17 +607,23 @@ onMounted(() => {
                         {{ getFilterLabel('category') }} <i class="fa-solid fa-chevron-down"></i>
                     </button>
                     <div class="filter-dropdown" v-if="showCategoryDropdown" @click.stop>
-                        <div
-                            v-for="item in filtersData.category"
-                            :key="item.t_id"
-                            class="filter-item"
-                            :class="{ active: selectedCategory == item.t_id }"
-                            @click="selectFilter('category', item.t_id)"
-                        >
-                            {{ item.t_name }}
+                        <div class="filter-search-box">
+                            <i class="fa-solid fa-magnifying-glass"></i>
+                            <input type="text" v-model="filterSearch.category" placeholder="搜尋分類..." @click.stop>
                         </div>
-                        <div v-if="!filtersData.category?.length" class="filter-item empty">
-                            暫無資料
+                        <div class="filter-options-list">
+                            <div
+                                v-for="item in getFilteredOptions('category')"
+                                :key="item.t_id"
+                                class="filter-item"
+                                :class="{ active: selectedCategory == item.t_id }"
+                                @click="selectFilter('category', item.t_id)"
+                            >
+                                {{ item.t_name }}
+                            </div>
+                            <div v-if="!getFilteredOptions('category').length" class="filter-item empty">
+                                暫無資料
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -561,17 +638,23 @@ onMounted(() => {
                         {{ getFilterLabel('color') }} <i class="fa-solid fa-chevron-down"></i>
                     </button>
                     <div class="filter-dropdown" v-if="showColorDropdown" @click.stop>
-                        <div
-                            v-for="item in filtersData.color"
-                            :key="item.t_id"
-                            class="filter-item"
-                            :class="{ active: selectedColor == item.t_id }"
-                            @click="selectFilter('color', item.t_id)"
-                        >
-                            {{ item.t_name }}
+                        <div class="filter-search-box">
+                            <i class="fa-solid fa-magnifying-glass"></i>
+                            <input type="text" v-model="filterSearch.color" placeholder="搜尋顏色..." @click.stop>
                         </div>
-                        <div v-if="!filtersData.color?.length" class="filter-item empty">
-                            暫無資料
+                        <div class="filter-options-list">
+                            <div
+                                v-for="item in getFilteredOptions('color')"
+                                :key="item.t_id"
+                                class="filter-item"
+                                :class="{ active: selectedColor == item.t_id }"
+                                @click="selectFilter('color', item.t_id)"
+                            >
+                                {{ item.t_name }}
+                            </div>
+                            <div v-if="!getFilteredOptions('color').length" class="filter-item empty">
+                                暫無資料
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -586,17 +669,23 @@ onMounted(() => {
                         {{ getFilterLabel('tag') }} <i class="fa-solid fa-chevron-down"></i>
                     </button>
                     <div class="filter-dropdown" v-if="showTagDropdown" @click.stop>
-                        <div
-                            v-for="item in filtersData.tag"
-                            :key="item.t_id"
-                            class="filter-item"
-                            :class="{ active: selectedTag == item.t_id }"
-                            @click="selectFilter('tag', item.t_id)"
-                        >
-                            {{ item.t_name }}
+                        <div class="filter-search-box">
+                            <i class="fa-solid fa-magnifying-glass"></i>
+                            <input type="text" v-model="filterSearch.tag" placeholder="搜尋標籤..." @click.stop>
                         </div>
-                        <div v-if="!filtersData.tag?.length" class="filter-item empty">
-                            暫無資料
+                        <div class="filter-options-list">
+                            <div
+                                v-for="item in getFilteredOptions('tag')"
+                                :key="item.t_id"
+                                class="filter-item"
+                                :class="{ active: selectedTag == item.t_id }"
+                                @click="selectFilter('tag', item.t_id)"
+                            >
+                                {{ item.t_name }}
+                            </div>
+                            <div v-if="!getFilteredOptions('tag').length" class="filter-item empty">
+                                暫無資料
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -664,7 +753,7 @@ onMounted(() => {
                 :class="{ 'list-view': currentView === 'list' }"
             >
                 <div
-                    v-for="(portfolio, index) in filteredportfolio"
+                    v-for="(portfolio, index) in displayedPortfolio"
                     :key="portfolio.d_id || index"
                     class="website-card"
                 >
@@ -708,6 +797,13 @@ onMounted(() => {
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
                 </svg>
                 <p class="text-gray-500 text-lg">{{ searchQuery ? '找不到符合的資料' : '目前沒有資料' }}</p>
+            </div>
+            
+            <!-- 無限滾動觸發點 -->
+            <div ref="loadMoreTrigger" class="h-10 w-full flex items-center justify-center mt-4">
+                <div v-if="filteredportfolio.length > displayedPortfolio.length" class="text-gray-400 text-sm">
+                    <i class="fa-solid fa-circle-notch fa-spin mr-2"></i> 載入中...
+                </div>
             </div>
         </div>
     </main>
@@ -759,8 +855,57 @@ onMounted(() => {
     border-radius: 8px;
     box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
     z-index: 1000;
-    max-height: 300px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.filter-search-box {
+    padding: 8px 12px;
+    border-bottom: 1px solid #e5e7eb;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: #f9fafb;
+    flex-shrink: 0;
+}
+
+.filter-search-box i {
+    color: #9ca3af;
+    font-size: 14px;
+}
+
+.filter-search-box input {
+    border: none;
+    background: transparent;
+    width: 100%;
+    font-size: 14px;
+    color: #374151;
+    outline: none;
+}
+
+.filter-search-box input::placeholder {
+    color: #9ca3af;
+}
+
+.filter-options-list {
+    max-height: 250px;
     overflow-y: auto;
+}
+
+@media (max-width: 768px) {
+    .filter-group {
+        position: static;
+    }
+    .filter-dropdown {
+        top: 100%;
+        left: 0;
+        right: 0;
+        width: 100%;
+        border-radius: 0 0 8px 8px;
+        border-left: none;
+        border-right: none;
+    }
 }
 
 .filter-item {
@@ -920,5 +1065,34 @@ onMounted(() => {
 .tag-tag:hover {
     background: #fecdd3;
     color: #9f1239;
+}
+
+/* 載入更多按鈕 */
+.btn-load-more {
+    background: white;
+    border: 1px solid #e5e7eb;
+    padding: 10px 24px;
+    border-radius: 9999px;
+    cursor: pointer;
+    font-size: 15px;
+    font-weight: 500;
+    color: #4b5563;
+    transition: all 0.3s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+}
+
+.btn-load-more:hover {
+    background: #f9fafb;
+    border-color: #d1d5db;
+    color: #111827;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+}
+
+.btn-load-more i {
+    font-size: 12px;
 }
 </style>
