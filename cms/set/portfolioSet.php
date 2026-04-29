@@ -22,7 +22,6 @@ $settingPage = [
     
     'listPage' => [
         'title' => '列表',
-        'itemsPerPage' => 9999999,
         'hasCategory' => false,
         'imageFileType' => 'portfolioCover',
         'showAddButton' => true,
@@ -36,6 +35,7 @@ $settingPage = [
             ['field' => 'edit', 'label' => '編輯', 'type' => 'button', 'width' => '30'],
             ['field' => 'delete', 'label' => '刪除', 'type' => 'button', 'width' => '30']
         ],
+        'itemsPerPage' => 12,
         'orderBy' => 'd_sort ASC, d_date DESC'
     ],
     

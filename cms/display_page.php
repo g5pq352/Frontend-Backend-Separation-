@@ -1,133 +1,52 @@
 <?php
 
 function displayPages($pageNum, $queryString, $totalPages, $totalRows, $currentPage) {
+    if ($totalPages <= 0) return;
 
-    echo "<table border='0'><tr><td>";
+    echo '<ul class="pagination pagination-modern pagination-modern-spacing justify-content-center">';
 
+    // Previous Button
     if ($pageNum > 0) {
-        // Show if not first page
-
-        echo "<a href=";
-        printf("%s?pageNum=%d%s", $currentPage, max(0, $pageNum - 1), $queryString);
-        echo "><</a>";
-    } // Show if not first page
-
-    echo "</td><td>";
-
-    //echo $totalRows;//所有筆數
-    //echo $totalPages;//最後分頁的頁數,由0開始的陣列
-    //echo $pageNum;//現在顯示的頁面,由0開始的陣列
-    //echo $currentPage;//現在的目錄路徑
-    //echo $queryString;//以字串顯示所有的筆數,如&totalRows=11
-    if ($totalPages < 10) {
-        if ($totalRows == 0) {
-            //如果沒有任何資料，不顯示|符號
-        } else {
-            echo " | ";
-        }
-
-        for ($i = 1; $i <= $totalPages + 1; $i++) {
-            //如果非正在顯示的分頁則建立頁碼連結
-            if ($i != intval($pageNum) + 1) {
-
-                echo "<a href=";
-                printf("%s?pageNum=%d%s", $currentPage, $i - 1, $queryString);
-                echo ">" . $i . "</a> | ";
-            }
-            //如果是正在顯示的方頁則單純顯示頁碼
-            else {
-                echo "<font style=\"text-decoration: underline;\">" . $i . "</font>" . " | ";
-            }
-        }
-    } else //$totalPages>10
-    {
-        $morePage_num = $totalPages - $pageNum; //此頁面之後總共有多少
-        if ($morePage_num > 7) {
-            if ($pageNum < 3) {
-                if ($totalRows == 0) {
-                    //如果沒有任何資料，不顯示|符號
-                } else {
-                    echo " | ";
-                }
-
-                for ($i = 1; $i <= 10; $i++) {
-                    //如果非正在顯示的分頁則建立頁碼連結
-                    if ($i != $pageNum + 1) {
-
-                        echo "<a href=";
-                        printf("%s?pageNum=%d%s", $currentPage, $i - 1, $queryString);
-                        echo ">" . $i . "</a> | ";
-                    }
-                    //如果是正在顯示的方頁則單純顯示頁碼
-                    else {
-                        echo "<font style=\"text-decoration: underline;\">" . $i . "</font>" . " | ";
-                    }
-                }
-
-                echo "<a href=";
-                printf("%s?pageNum=%d%s", $currentPage, $totalPages, $queryString);
-                echo ">..." . ($totalPages + 1) . "</a> | ";
-            } else //$pageNum>=3
-            {
-                echo "<a href=";
-                printf("%s?pageNum=%d%s", $currentPage, 0, $queryString);
-                echo ">" . 1 . "...</a> | ";
-
-                for ($i = $pageNum - 1; $i <= $pageNum + 8; $i++) {
-                    //如果非正在顯示的分頁則建立頁碼連結
-                    if ($i != $pageNum + 1) {
-
-                        echo "<a href=";
-                        printf("%s?pageNum=%d%s", $currentPage, $i - 1, $queryString);
-                        echo ">" . $i . "</a> | ";
-                    }
-                    //如果是正在顯示的方頁則單純顯示頁碼
-                    else {
-                        echo "<font style=\"text-decoration: underline;\">" . $i . "</font>" . " | ";
-                    }
-                }
-
-                echo "<a href=";
-                printf("%s?pageNum=%d%s", $currentPage, $totalPages, $queryString);
-                echo ">..." . ($totalPages + 1) . "</a> | ";
-            }
-        } else //$morePage_num<=7
-        {
-            $beforePage_num = 9 - $morePage_num;
-            $beforePage = $pageNum - $beforePage_num;
-
-            //echo "<br>beforePage_num=".$beforePage_num."<br>";
-            //echo "beforePage=".$beforePage."<br>";
-
-            echo " | <a href=";
-            printf("%s?pageNum=%d%s", $currentPage, 0, $queryString);
-            echo ">" . 1 . "...</a> | ";
-
-            for ($i = $beforePage + 1; $i <= $totalPages + 1; $i++) {
-                //如果非正在顯示的分頁則建立頁碼連結
-                if ($i != $pageNum + 1) {
-
-                    echo "<a href=";
-                    printf("%s?pageNum=%d%s", $currentPage, $i - 1, $queryString);
-                    echo ">" . $i . "</a> | ";
-                }
-                //如果是正在顯示的方頁則單純顯示頁碼
-                else {
-                    echo "<font style=\"text-decoration: underline;\">" . $i . "</font>" . " | ";
-                }
-            }
-        }
-
+        $prevPage = max(0, $pageNum - 1);
+        echo '<li class="page-item previous"><a class="page-link" href="' . sprintf("%s?pageNum=%d%s", $currentPage, $prevPage, $queryString) . '"><i class="fas fa-chevron-left"></i></a></li>';
+    } else {
+        echo '<li class="page-item previous disabled"><a class="page-link" href="javascript:void(0);"><i class="fas fa-chevron-left"></i></a></li>';
     }
 
-    echo "</td><td>";
+    // Determine the range of pages to show
+    $startPage = max(0, $pageNum - 2);
+    $endPage = min($totalPages, $pageNum + 2);
 
+    if ($startPage > 0) {
+        echo '<li class="page-item"><a class="page-link" href="' . sprintf("%s?pageNum=0%s", $currentPage, $queryString) . '">1</a></li>';
+        if ($startPage > 1) {
+            echo '<li class="page-item disabled"><span class="page-link">...</span></li>';
+        }
+    }
+
+    for ($i = $startPage; $i <= $endPage; $i++) {
+        if ($i == $pageNum) {
+            echo '<li class="page-item active"><a class="page-link" href="javascript:void(0);">' . ($i + 1) . '</a></li>';
+        } else {
+            echo '<li class="page-item"><a class="page-link" href="' . sprintf("%s?pageNum=%d%s", $currentPage, $i, $queryString) . '">' . ($i + 1) . '</a></li>';
+        }
+    }
+
+    if ($endPage < $totalPages) {
+        if ($endPage < $totalPages - 1) {
+            echo '<li class="page-item disabled"><span class="page-link">...</span></li>';
+        }
+        echo '<li class="page-item"><a class="page-link" href="' . sprintf("%s?pageNum=%d%s", $currentPage, $totalPages, $queryString) . '">' . ($totalPages + 1) . '</a></li>';
+    }
+
+    // Next Button
     if ($pageNum < $totalPages) {
-        // Show if not last page
-        echo "<a href=";
-        printf("%s?pageNum=%d%s", $currentPage, min($totalPages, (int)$pageNum + 1), $queryString);
-        echo ">></a>";
-    } // Show if not last page
-    echo "</td></tr></table>";
+        $nextPage = min($totalPages, (int)$pageNum + 1);
+        echo '<li class="page-item next"><a class="page-link" href="' . sprintf("%s?pageNum=%d%s", $currentPage, $nextPage, $queryString) . '"><i class="fas fa-chevron-right"></i></a></li>';
+    } else {
+        echo '<li class="page-item next disabled"><a class="page-link" href="javascript:void(0);"><i class="fas fa-chevron-right"></i></a></li>';
+    }
+
+    echo '</ul>';
 }
 ?>

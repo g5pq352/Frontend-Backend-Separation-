@@ -23,6 +23,9 @@ Theme Version: 	4.0.0
 					orderable: false
 				}
 			],
+			paging: false,   // 關閉 JS 分頁，讓 PHP (display_page.php) 的傳統分頁按鈕接管
+			info: false,     // 關閉左下角的「顯示第 1 至 12 項結果」，避免與 PHP 分頁衝突
+			bSort: false,    // 關閉 JS 排序，因為 JS 只會排序當下這 20 筆，沒有意義
 			pageLength: 12,
 			order: [],
 			language: {
@@ -52,36 +55,41 @@ Theme Version: 	4.0.0
 
 		// Link "Show" select for change the "pageLength" of dataTable
 		$(document).on('change', '.results-per-page', function(){
-			var $this = $(this),
-				$dataTable = $this.closest('.datatables-header-footer-wrapper').find('.dataTable').DataTable();
-
-			$dataTable.page.len( $this.val() ).draw();
+			var $this = $(this);
+			var url = new URL(window.location.href);
+			url.searchParams.set('maxRows', $this.val());
+			url.searchParams.set('pageNum', 0); // 回到第一頁
+			window.location.href = url.toString();
 		});
 
-		// Link "Search" field to show results based in the term entered (the "Filter By" is considered to filter the results)
-		$(document).on('keyup', '.search-term', function(){
-			var $this = $(this),
-				$filterBy = $this.closest('.datatables-header-footer-wrapper').find('.filter-by'),
-				$dataTableElement = $this.closest('.datatables-header-footer-wrapper').find('.dataTable');
+		// Function to perform server-side search
+		var performSearch = function() {
+			var $searchField = $('.search-term');
+			var url = new URL(window.location.href);
+			if ($searchField.val().trim() !== '') {
+				url.searchParams.set('search', $searchField.val().trim());
+			} else {
+				url.searchParams.delete('search');
+			}
+			url.searchParams.set('pageNum', 0); // 回到第一頁
+			window.location.href = url.toString();
+		};
 
-			// 確保 DataTable 已經初始化
-			if ( $.fn.DataTable.isDataTable( $dataTableElement ) ) {
-				var $dataTable = $dataTableElement.DataTable();
-
-				// 清除所有欄位的搜尋條件
-				$dataTable.columns().search('');
-
-				// 執行全域搜尋
-				$dataTable.search( $this.val() ).draw();
+		// Link "Search" field to trigger server-side search on Enter key
+		$(document).on('keyup', '.search-term', function(e){
+			if(e.key === 'Enter' || e.keyCode === 13) {
+				performSearch();
 			}
 		});
 
-		// Trigger "keyup" event when "filter-by" changes
-		$(document).on('change', '.filter-by', function(){
-			var $this = $(this),
-				$searchField = $this.closest('.datatables-header-footer-wrapper').find('.search-term');
+		// Trigger search on button click
+		$(document).on('click', '.search-button', function(){
+			performSearch();
+		});
 
-			$searchField.trigger('keyup');
+		// Trigger search when "filter-by" changes (keep existing behavior, but server-side if needed)
+		$(document).on('change', '.filter-by', function(){
+			// 如果分類改變，原本會觸發搜尋，現在不需要了，因為分類改變本身就會 reload 頁面
 		});
 
 		// Select All

@@ -44,7 +44,7 @@ $isHomeDisplayModule = $moduleConfig['isHomeDisplayModule'] ?? false;
 $targetModule = $moduleConfig['targetModule'] ?? null;
 
 // 設定每頁顯示筆數與當前頁碼
-$maxRows = $moduleConfig['listPage']['itemsPerPage'] ?? 20;
+$maxRows = isset($_GET['maxRows']) ? (int)$_GET['maxRows'] : ($moduleConfig['listPage']['itemsPerPage'] ?? 20);
 $pageNum = isset($_GET['pageNum']) ? (int) $_GET['pageNum'] : 0;
 $startRow = $pageNum * $maxRows;
 
@@ -455,6 +455,14 @@ if ($columnExists) { // Only apply trash filter if the column exists
     } else {
         $conditions[] = "{$tableAlias}.{$col_delete_time} IS NULL";
     }
+}
+
+// 搜尋條件
+$searchTerm = isset($_GET['search']) ? trim($_GET['search']) : '';
+if ($searchTerm !== '') {
+    // 預設搜尋標題，如果有需要可以擴充搜尋其他欄位
+    $conditions[] = "{$tableAlias}.{$col_title} LIKE :searchTerm";
+    $params[':searchTerm'] = "%{$searchTerm}%";
 }
 
 
@@ -878,10 +886,10 @@ require_once('display_page.php');
                                                 <div class="d-flex align-items-lg-center flex-column flex-lg-row">
                                                     <label class="ws-nowrap me-3 mb-0">Show:</label>
                                                     <select class="form-control select-style-1 results-per-page" name="results-per-page">
-                                                        <option value="12" selected>12</option>
-                                                        <option value="24">24</option>
-                                                        <option value="36">36</option>
-                                                        <option value="100">100</option>
+                                                        <option value="12" <?= $maxRows == 12 ? 'selected' : '' ?>>12</option>
+                                                        <option value="24" <?= $maxRows == 24 ? 'selected' : '' ?>>24</option>
+                                                        <option value="36" <?= $maxRows == 36 ? 'selected' : '' ?>>36</option>
+                                                        <option value="100" <?= $maxRows == 100 ? 'selected' : '' ?>>100</option>
                                                     </select>
                                                 </div>
                                             </div>
@@ -889,8 +897,8 @@ require_once('display_page.php');
                                                 <div class="search search-style-1 search-style-1-lg mx-lg-auto">
                                                     <div class="input-group">
                                                         <input type="text" class="search-term form-control" name="search-term"
-                                                            id="search-term" placeholder="Search Category">
-                                                        <button class="btn btn-default" type="submit"><i
+                                                            id="search-term" placeholder="Search Category" value="<?php echo htmlspecialchars($searchTerm ?? '', ENT_QUOTES, 'UTF-8'); ?>">
+                                                        <button class="btn btn-default search-button" type="button"><i
                                                                 class="bx bx-search"></i></button>
                                                     </div>
                                                 </div>
@@ -1375,10 +1383,21 @@ require_once('display_page.php');
                                             </div>
                                             <?php endif; ?>
                                             <div class="col-lg-auto text-center order-3 order-lg-2">
-                                                <div class="results-info-wrapper"></div>
+                                                <div class="results-info-wrapper">
+                                                    <?php 
+                                                    $endRow = min($totalRows, $startRow + $maxRows);
+                                                    echo "顯示第 " . ($totalRows > 0 ? $startRow + 1 : 0) . " 至 {$endRow} 項結果，共 {$totalRows} 項"; 
+                                                    ?>
+                                                </div>
                                             </div>
                                             <div class="col-lg-auto order-2 order-lg-3 mb-3 mb-lg-0">
-                                                <div class="pagination-wrapper"></div>
+                                                <div class="pagination-wrapper">
+                                                    <?php
+                                                    if (function_exists('displayPages') && $totalPages > 0) {
+                                                        displayPages($pageNum, $queryString, $totalPages, $totalRows, $_SERVER['PHP_SELF']);
+                                                    }
+                                                    ?>
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
